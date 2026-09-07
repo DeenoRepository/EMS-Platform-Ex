@@ -8,6 +8,7 @@ import { ok, fail } from '@ems/contracts';
 import type { DatabasePool } from '../persistence/db.js';
 import { ModuleAvailabilityRepository } from '../persistence/module-availability.repository.js';
 import { verifySubjectCredential } from './subject-auth.js';
+import { dependencyFailure } from './errors.js';
 
 export class PostgresAuthorizationFacade implements AuthorizationFacade {
   private readonly moduleAvailabilityRepo = new ModuleAvailabilityRepository();
@@ -45,7 +46,12 @@ export class PostgresAuthorizationFacade implements AuthorizationFacade {
       });
     }
 
-    const authRes = await verifySubjectCredential(this.pool, credential);
+    let authRes: Awaited<ReturnType<typeof verifySubjectCredential>>;
+    try {
+      authRes = await verifySubjectCredential(this.pool, credential);
+    } catch {
+      return fail(dependencyFailure('Ошибка базы данных при проверке авторизации'));
+    }
     if (!authRes.ok) {
       return fail(authRes.error);
     }
@@ -68,11 +74,16 @@ export class PostgresAuthorizationFacade implements AuthorizationFacade {
 
     // Проверка доступности модуля отделу сотрудника (FR-016)
     if (moduleId) {
-      const isAvailable = await this.moduleAvailabilityRepo.isModuleAvailable(
-        this.pool,
-        moduleId,
-        employee.department_id,
-      );
+      let isAvailable: boolean;
+      try {
+        isAvailable = await this.moduleAvailabilityRepo.isModuleAvailable(
+          this.pool,
+          moduleId,
+          employee.department_id,
+        );
+      } catch {
+        return fail(dependencyFailure('Ошибка базы данных при проверке доступности модуля'));
+      }
       if (!isAvailable) {
         return ok({
           allowed: false,

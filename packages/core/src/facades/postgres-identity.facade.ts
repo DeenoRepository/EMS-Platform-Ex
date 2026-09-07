@@ -9,7 +9,9 @@ import type {
   SessionContext,
   DirectoryAuthenticator,
   DirectoryIdentityResolver,
+  DirectoryIdentity,
   LocalOperatorPort,
+  LocalOperatorIdentity,
   AppError,
 } from '@ems/contracts';
 import { ok, fail } from '@ems/contracts';
@@ -20,6 +22,7 @@ import { RoleRepository } from '../persistence/role.repository.js';
 import { SessionRepository } from '../persistence/session.repository.js';
 import { AuditRepository } from '../persistence/audit.repository.js';
 import { hashCredential } from './subject-auth.js';
+import { dependencyFailure, normalizeDependencyResult, isNonEmptyString } from './errors.js';
 
 export const ADMIN_ROLE_ID = 'role.platform.admin';
 
@@ -63,13 +66,19 @@ export class PostgresIdentityFacade implements IdentityFacade {
     }
 
     // 2. Аутентификация через службу каталога (LDAP/AD)
-    const authResult = await this.authenticator.authenticate(input.upn, input.password);
-    if (!authResult.ok) {
-      return fail(authResult.error);
+    let authResult: Awaited<ReturnType<DirectoryAuthenticator['authenticate']>>;
+    try {
+      authResult = await this.authenticator.authenticate(input.upn, input.password);
+    } catch {
+      return fail(dependencyFailure('Служба каталога недоступна', true));
     }
+    const safeAuthResult = normalizeDependencyResult<DirectoryIdentity>(
+      authResult, 'Служба каталога вернула некорректный ответ',
+    );
+    if (!safeAuthResult.ok) return fail(safeAuthResult.error);
 
-    const ldapUser = authResult.value;
-    if (!ldapUser.directoryId || !ldapUser.objectGuid || !ldapUser.upn) {
+    const ldapUser = safeAuthResult.value;
+    if (!isDirectoryIdentity(ldapUser)) {
       return fail({
         code: 'DEPENDENCY_UNAVAILABLE',
         message: 'Некорректный ответ службы каталога',
@@ -77,37 +86,7 @@ export class PostgresIdentityFacade implements IdentityFacade {
       });
     }
 
-    // 3. Предварительная проверка блокировки учетной записи
-    const existing = await this.employeeRepo.findByDirectoryGuid(
-      this.pool,
-      ldapUser.directoryId,
-      ldapUser.objectGuid,
-    );
-
-    if (existing && existing.status === 'BLOCKED') {
-      // Преднамеренная запись аудита блокировки входа (FR-006, план 3.7)
-      try {
-        await this.auditRepo.insert(this.pool, {
-          id: crypto.randomUUID(),
-          subjectId: existing.id,
-          action: 'LOGIN_BLOCKED',
-          objectType: 'employee',
-          objectId: existing.id,
-          result: 'FAILURE',
-          details: { upn: input.upn },
-        });
-      } catch {
-        // Ошибка аудита не должна маскировать отказ входа заблокированного сотрудника
-      }
-
-      return fail({
-        code: 'FORBIDDEN',
-        message: 'Учетная запись сотрудника заблокирована',
-        retryable: false,
-      });
-    }
-
-    // 4. Транзакция создания/поиска сотрудника, создания сессии и записи аудита
+    // 3. Транзакция создания/поиска сотрудника, создания сессии и записи аудита
     try {
       return await this.pool.withTransaction(async (client) => {
         // Конкурентно-безопасный get-or-create по (directory_id, object_guid)
@@ -120,6 +99,14 @@ export class PostgresIdentityFacade implements IdentityFacade {
         });
 
         if (employee.status === 'BLOCKED') {
+          await this.auditRepo.insert(client, {
+            id: crypto.randomUUID(),
+            subjectId: employee.id,
+            action: 'LOGIN_BLOCKED',
+            objectType: 'employee',
+            objectId: employee.id,
+            result: 'FAILURE',
+          });
           throw new TransactionAbortError({
             code: 'FORBIDDEN',
             message: 'Учетная запись сотрудника заблокирована',
@@ -223,14 +210,19 @@ export class PostgresIdentityFacade implements IdentityFacade {
     }
 
     // 3. Подтверждение оператора и права platform.bootstrap через внедряемый порт
-    const opResult = await this.localOperatorPort.resolveOperator();
-    if (!opResult.ok) {
-      return fail(opResult.error);
+    let opResult: Awaited<ReturnType<LocalOperatorPort['resolveOperator']>>;
+    try {
+      opResult = await this.localOperatorPort.resolveOperator();
+    } catch {
+      return fail(dependencyFailure('Локальный оператор недоступен', true));
     }
-    const operator = opResult.value;
+    const safeOperatorResult = normalizeDependencyResult(opResult, 'Локальный оператор вернул некорректный ответ');
+    if (!safeOperatorResult.ok) return fail(safeOperatorResult.error);
+    const operator = safeOperatorResult.value;
     if (
-      !operator.operatorId ||
+      !isLocalOperatorIdentity(operator) ||
       !Array.isArray(operator.permissions) ||
+      operator.permissions.some((permission) => typeof permission !== 'string') ||
       !operator.permissions.includes('platform.bootstrap')
     ) {
       return fail({
@@ -241,12 +233,16 @@ export class PostgresIdentityFacade implements IdentityFacade {
     }
 
     // 4. Подтверждение AD-личности через внедряемый порт службы каталога
-    const dirResult = await this.directoryResolver.resolveByUpn(input.upn);
-    if (!dirResult.ok) {
-      return fail(dirResult.error);
+    let dirResult: Awaited<ReturnType<DirectoryIdentityResolver['resolveByUpn']>>;
+    try {
+      dirResult = await this.directoryResolver.resolveByUpn(input.upn);
+    } catch {
+      return fail(dependencyFailure('Служба каталога недоступна', true));
     }
-    const ldapIdentity = dirResult.value;
-    if (!ldapIdentity.directoryId || !ldapIdentity.objectGuid || !ldapIdentity.upn) {
+    const safeDirResult = normalizeDependencyResult(dirResult, 'Служба каталога вернула некорректный ответ');
+    if (!safeDirResult.ok) return fail(safeDirResult.error);
+    const ldapIdentity = safeDirResult.value;
+    if (!isDirectoryIdentity(ldapIdentity)) {
       return fail({
         code: 'DEPENDENCY_UNAVAILABLE',
         message: 'Некорректный ответ службы каталога при проверке AD-личности',
@@ -288,7 +284,7 @@ export class PostgresIdentityFacade implements IdentityFacade {
         }
 
         // Проверяем статус существующей записи AD-личности (если уже есть)
-        const existingEmployee = await this.employeeRepo.findByDirectoryGuid(
+        const existingEmployee = await this.employeeRepo.findByDirectoryGuidForUpdate(
           client,
           ldapIdentity.directoryId,
           ldapIdentity.objectGuid,
@@ -330,19 +326,18 @@ export class PostgresIdentityFacade implements IdentityFacade {
         // Создаем или назначаем сотрудника
         let employee: import('../persistence/employee.repository.js').EmployeeRow;
         if (!existingEmployee) {
-          employee = await this.employeeRepo.create(
-            client,
-            {
-              id: crypto.randomUUID(),
-              directoryId: ldapIdentity.directoryId,
-              objectGuid: ldapIdentity.objectGuid,
-              upn: ldapIdentity.upn,
-              displayName: ldapIdentity.displayName,
-              status: 'ACTIVE',
-              departmentId: dept.id,
-            },
-            [ADMIN_ROLE_ID],
+          employee = await this.employeeRepo.getOrCreateByDirectoryGuid(client, {
+            directoryId: ldapIdentity.directoryId,
+            objectGuid: ldapIdentity.objectGuid,
+            upn: ldapIdentity.upn,
+            displayName: ldapIdentity.displayName,
+            status: 'ACTIVE',
+            departmentId: dept.id,
+          });
+          const assigned = await this.employeeRepo.updateAssignment(
+            client, employee.id, dept.id, [ADMIN_ROLE_ID], employee.version,
           );
+          employee = assigned ?? employee;
         } else {
           const updated = await this.employeeRepo.updateAssignment(
             client,
@@ -352,6 +347,8 @@ export class PostgresIdentityFacade implements IdentityFacade {
           );
           employee = updated ?? existingEmployee;
         }
+
+        await this.sessionRepo.revokeAllForEmployee(client, employee.id, 'BOOTSTRAP_COMPLETED');
 
         // Переводим bootstrap_state в completed
         await client.query(
@@ -390,4 +387,19 @@ export class PostgresIdentityFacade implements IdentityFacade {
       });
     }
   }
+}
+
+function isDirectoryIdentity(value: unknown): value is DirectoryIdentity {
+  return Boolean(value) && typeof value === 'object' &&
+    isNonEmptyString((value as DirectoryIdentity).directoryId) &&
+    isNonEmptyString((value as DirectoryIdentity).objectGuid) &&
+    isNonEmptyString((value as DirectoryIdentity).upn) &&
+    isNonEmptyString((value as DirectoryIdentity).displayName);
+}
+
+function isLocalOperatorIdentity(value: unknown): value is LocalOperatorIdentity {
+  return Boolean(value) && typeof value === 'object' &&
+    isNonEmptyString((value as LocalOperatorIdentity).operatorId) &&
+    Array.isArray((value as LocalOperatorIdentity).permissions) &&
+    (value as LocalOperatorIdentity).permissions.every((permission) => typeof permission === 'string');
 }

@@ -7,7 +7,8 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "clean": "tsc -b --clean",
-    "test": "pnpm -r run test"
+    "test": "pnpm -r run test",
+    "check:boundaries": "node tools/check-boundaries.mjs"
   },
   "packageManager": "pnpm@11.16.0",
   "devDependencies": {

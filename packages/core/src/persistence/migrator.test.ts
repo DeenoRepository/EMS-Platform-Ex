@@ -7,6 +7,8 @@ class MockMigratorPool {
   public executedSqls: string[] = [];
   public bootstrapState: { id: number; status: string } | null = null;
   public failNextSql = false;
+  public failOnSqlContaining: string | null = null;
+  public schemaExists = false;
 
   get rawPool(): any {
     return this;
@@ -16,6 +18,9 @@ class MockMigratorPool {
     const cleanSql = text.trim().replace(/\s+/g, ' ');
     this.executedSqls.push(cleanSql);
 
+    if (this.failOnSqlContaining && cleanSql.includes(this.failOnSqlContaining)) {
+      throw new Error('Simulated SQL failure');
+    }
     if (this.failNextSql) {
       this.failNextSql = false;
       throw new Error('Simulated SQL failure');
@@ -23,6 +28,9 @@ class MockMigratorPool {
 
     if (cleanSql.includes('SELECT pg_advisory_xact_lock')) {
       return { rows: [], rowCount: 1 };
+    }
+    if (cleanSql.includes('SELECT EXISTS (SELECT 1 FROM pg_namespace')) {
+      return { rows: [{ exists: this.schemaExists }], rowCount: 1 };
     }
     if (cleanSql.includes('CREATE TABLE IF NOT EXISTS ems_core.schema_migrations') || cleanSql.includes('CREATE SCHEMA IF NOT EXISTS') || cleanSql.includes('ALTER TABLE ems_core.schema_migrations')) {
       return { rows: [], rowCount: 0 };
@@ -174,7 +182,7 @@ describe('SchemaMigrator unit tests', () => {
     assert.equal(mock.migrationsTable.length, 1);
 
     // Имитируем сбой выполнения SQL отката
-    mock.failNextSql = true;
+    mock.failOnSqlContaining = 'DROP TABLE test1';
 
     await assert.rejects(
       async () => {
@@ -186,6 +194,25 @@ describe('SchemaMigrator unit tests', () => {
     // Метаданные не удалены благодаря откату транзакции
     assert.equal(mock.migrationsTable.length, 1);
     assert.equal(mock.migrationsTable[0]?.version, '001_core_schema');
+  });
+
+  test('clean provisioning отклоняется для существующей схемы и пустого набора', async () => {
+    const existing = new MockMigratorPool() as any;
+    existing.schemaExists = true;
+    const migrator = new SchemaMigrator(existing);
+    await assert.rejects(() => migrator.provisionClean([sample001]), /absent ems_core schema/);
+    assert.equal(existing.migrationsTable.length, 0);
+
+    const empty = new MockMigratorPool() as any;
+    await assert.rejects(() => new SchemaMigrator(empty).provisionClean([]), /at least one migration/);
+  });
+
+  test('applyMigration не принимает частичный cleanProvision путь', async () => {
+    const mock = new MockMigratorPool() as any;
+    await assert.rejects(
+      () => new SchemaMigrator(mock).applyMigration(sample001, { cleanProvision: true }),
+      /complete migration set/,
+    );
   });
 
   test('provisionClean переводит bootstrap_state в состояние ready', async () => {

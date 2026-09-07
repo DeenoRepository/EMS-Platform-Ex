@@ -31,6 +31,9 @@ export class SchemaMigrator {
     migration: Migration,
     options?: { cleanProvision?: boolean },
   ): Promise<void> {
+    if (options?.cleanProvision) {
+      throw new Error('cleanProvision requires the complete migration set; use provisionClean()');
+    }
     await this.pool.withTransaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtext('ems_core.migration_lock'))");
       await this.ensureMigrationTable(client);
@@ -48,8 +51,17 @@ export class SchemaMigrator {
   }
 
   async provisionClean(migrations: readonly Migration[]): Promise<void> {
+    if (migrations.length === 0) {
+      throw new Error('Clean provisioning requires at least one migration');
+    }
     await this.pool.withTransaction(async (client) => {
       await client.query("SELECT pg_advisory_xact_lock(hashtext('ems_core.migration_lock'))");
+      const schemaRes = await client.query<{ exists: boolean }>(
+        "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'ems_core') AS exists",
+      );
+      if (schemaRes.rows[0]?.exists) {
+        throw new Error('Clean provisioning requires an absent ems_core schema');
+      }
       await this.ensureMigrationTable(client);
 
       for (const migration of migrations) {

@@ -21,7 +21,7 @@ export class ExtensionRegistry {
   private readonly modules = new Map<string, RegisteredModule>();
   private readonly permissionOwners = new Map<string, string>();
   private readonly contributionOwners = new Map<string, string>();
-  private readonly diagnosticRunners = new Map<string, DiagnosticRunner>();
+  private readonly diagnosticRunners = new Map<string, Map<string, DiagnosticRunner>>();
 
   register(
     manifest: ModuleManifest,
@@ -266,9 +266,11 @@ export class ExtensionRegistry {
     }
 
     if (runner && clonedManifest.diagnostics) {
+      const moduleRunners = new Map<string, DiagnosticRunner>();
       for (const diag of clonedManifest.diagnostics) {
-        this.diagnosticRunners.set(`${clonedManifest.id}:${diag.id}`, runner);
+        moduleRunners.set(diag.id, runner);
       }
+      this.diagnosticRunners.set(clonedManifest.id, moduleRunners);
     }
 
     this.modules.set(clonedManifest.id, {
@@ -280,11 +282,27 @@ export class ExtensionRegistry {
   }
 
   getModule(id: string): RegisteredModule | undefined {
-    return this.modules.get(id);
+    const registered = this.modules.get(id);
+    return registered ? this.snapshot(registered) : undefined;
   }
 
   getAllModules(): readonly RegisteredModule[] {
-    return Array.from(this.modules.values());
+    return Array.from(this.modules.values(), (registered) => this.snapshot(registered));
+  }
+
+  private snapshot(registered: RegisteredModule): RegisteredModule {
+    const manifest: ModuleManifest = {
+      id: registered.manifest.id,
+      kind: registered.manifest.kind,
+      contractVersion: registered.manifest.contractVersion,
+      displayName: registered.manifest.displayName,
+      permissions: registered.manifest.permissions.map((permission) => ({ ...permission })),
+      uiContributions: registered.manifest.uiContributions.map((contribution) => ({ ...contribution })),
+      ...(registered.manifest.diagnostics
+        ? { diagnostics: registered.manifest.diagnostics.map((diagnostic) => ({ ...diagnostic })) }
+        : {}),
+    };
+    return { manifest, registeredAt: new Date(registered.registeredAt.getTime()) };
   }
 
   getAllPermissions(): readonly string[] {
@@ -296,8 +314,7 @@ export class ExtensionRegistry {
     diagnosticId: string,
     timeoutMs = 5000,
   ): Promise<DiagnosticResult> {
-    const key = `${moduleId}:${diagnosticId}`;
-    const runner = this.diagnosticRunners.get(key);
+    const runner = this.diagnosticRunners.get(moduleId)?.get(diagnosticId);
     if (!runner) {
       return {
         status: 'error',

@@ -115,7 +115,7 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
           });
         }
 
-        // 3. Проверка субъекта и прав ПОСЛЕ получения барьера
+        // 3. Lock the target row before reading its roles or changing assignment.
         const authRes = await verifySubjectCredential(client, input.actorCredential, {
           requireActive: true,
           requireDepartment: true,
@@ -135,12 +135,10 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
         }
 
         // 4. Поиск целевого сотрудника
-        const targetEmployee = await this.employeeRepo.findById(client, input.employeeId);
-        if (!targetEmployee) {
+        const lockedTarget = await this.employeeRepo.findByIdForUpdate(client, input.employeeId);
+        if (!lockedTarget) {
           throw new TransactionAbortError({
-            code: 'NOT_FOUND_OR_FORBIDDEN',
-            message: 'Сотрудник не найден',
-            retryable: false,
+            code: 'NOT_FOUND_OR_FORBIDDEN', message: 'Сотрудник не найден', retryable: false,
           });
         }
 
@@ -167,7 +165,7 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
         }
 
         // 7. Проверка прав на манипуляцию ролью администратора (FR-019)
-        const currentRoles = await this.employeeRepo.getRolesForEmployee(client, targetEmployee.id);
+        const currentRoles = await this.employeeRepo.getRolesForEmployee(client, lockedTarget.id);
         const wasAdmin = currentRoles.includes(ADMIN_ROLE_ID);
         const willBeAdmin = uniqueRoleIds.includes(ADMIN_ROLE_ID);
 
@@ -185,7 +183,7 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
         // Защита от снятия роли у последнего активного администратора (FR-019)
         if (wasAdmin && !willBeAdmin) {
           const adminCount = await this.employeeRepo.countActiveAdmins(client, ADMIN_ROLE_ID);
-          if (adminCount <= 1 && targetEmployee.status === 'ACTIVE') {
+          if (adminCount <= 1 && lockedTarget.status === 'ACTIVE') {
             throw new TransactionAbortError({
               code: 'CONFLICT',
               message: 'Нельзя отозвать административную роль у последнего активного администратора системы (FR-019)',
@@ -195,10 +193,10 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
         }
 
         // 8. Проверка версии целевого сотрудника
-        if (targetEmployee.version !== input.expectedVersion) {
+        if (lockedTarget.version !== input.expectedVersion) {
           throw new TransactionAbortError({
             code: 'CONFLICT',
-            message: `Конфликт параллельного изменения данных сотрудника: ожидалась версия ${input.expectedVersion}, текущая ${targetEmployee.version}`,
+            message: `Конфликт параллельного изменения данных сотрудника: ожидалась версия ${input.expectedVersion}, текущая ${lockedTarget.version}`,
             retryable: true,
           });
         }
@@ -223,7 +221,7 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
         // 10. Отзыв всех существующих сессий переведенного сотрудника (FR-020)
         const revokedCount = await this.sessionRepo.revokeAllForEmployee(
           client,
-          targetEmployee.id,
+          lockedTarget.id,
           'ASSIGNMENT_TRANSFERRED',
         );
 
@@ -233,10 +231,10 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
           subjectId: actor.id,
           action: 'ASSIGN_EMPLOYEE',
           objectType: 'employee',
-          objectId: targetEmployee.id,
+          objectId: lockedTarget.id,
           result: 'SUCCESS',
           details: {
-            previousDepartmentId: targetEmployee.department_id,
+            previousDepartmentId: lockedTarget.department_id,
             newDepartmentId: input.departmentId,
             previousRoleIds: currentRoles,
             newRoleIds: uniqueRoleIds,

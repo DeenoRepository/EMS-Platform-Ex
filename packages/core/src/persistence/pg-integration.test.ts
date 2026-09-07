@@ -10,11 +10,15 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const isOptIn = process.env.EMS_TEST_PG_INTEGRATION === 'true';
-const migrationUrl = process.env.EMS_TEST_PG_MIGRATION_URL || process.env.EMS_TEST_PG_URL;
-const runtimeUrl = process.env.EMS_TEST_PG_RUNTIME_URL || process.env.EMS_TEST_PG_URL;
+const migrationUrl = process.env.EMS_TEST_PG_MIGRATION_URL;
+const runtimeUrl = process.env.EMS_TEST_PG_RUNTIME_URL;
+const isAcceptanceRun = process.env.EMS_TEST_PG_REQUIRED === 'true';
 
 describe('PostgreSQL Real Integration Acceptance Tests', () => {
-  if (!isOptIn || !migrationUrl) {
+  if (!isOptIn || !migrationUrl || !runtimeUrl) {
+    if (isAcceptanceRun) {
+      throw new Error('PostgreSQL acceptance requires EMS_TEST_PG_INTEGRATION=true, EMS_TEST_PG_MIGRATION_URL and EMS_TEST_PG_RUNTIME_URL');
+    }
     test('PostgreSQL стенд не настроен (явный opt-in EMS_TEST_PG_INTEGRATION=true)', () => {
       // Согласно плану (п. 26, 86): без разрешенного изолированного стенда не подключаться к произвольной БД.
       // Не заменять отсутствие стенда mock-проверкой и не выдавать silent skip за приемку.

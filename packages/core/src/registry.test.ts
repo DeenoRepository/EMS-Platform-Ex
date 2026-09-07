@@ -247,6 +247,55 @@ describe('ExtensionRegistry contract tests', () => {
     assert.deepEqual(registry.getAllPermissions(), ['perm.mutable']);
   });
 
+  test('getter registry не позволяет изменить сохраненный manifest или registeredAt', () => {
+    const registry = new ExtensionRegistry();
+    assert.equal(registry.register(validManifest).ok, true);
+    const first = registry.getModule(validManifest.id)!;
+    (first.manifest.permissions as any).push({ id: 'injected', displayName: 'Injected' });
+    first.registeredAt.setTime(0);
+    const second = registry.getModule(validManifest.id)!;
+    assert.equal(second.manifest.permissions.length, 1);
+    assert.notEqual(second.registeredAt.getTime(), 0);
+  });
+
+  test('диагностическая ошибка, timeout и невалидный результат безопасны', async () => {
+    const registry = new ExtensionRegistry();
+    const manifest: ModuleManifest = {
+      ...validManifest,
+      id: 'test.extension.failures',
+      diagnostics: [
+        { id: 'throws', displayName: 'Throws' },
+        { id: 'hangs', displayName: 'Hangs' },
+        { id: 'invalid', displayName: 'Invalid' },
+      ],
+    };
+    assert.equal(registry.register(manifest, async (id) => {
+      if (id === 'throws') throw new Error('secret');
+      if (id === 'hangs') return await new Promise<never>(() => undefined);
+      return { status: 'invalid' } as any;
+    }).ok, true);
+    assert.equal((await registry.runDiagnostic(manifest.id, 'throws')).detailCode, 'DIAGNOSTIC_EXECUTION_FAILED');
+    assert.equal((await registry.runDiagnostic(manifest.id, 'hangs', 1)).status, 'timeout');
+    assert.equal((await registry.runDiagnostic(manifest.id, 'invalid')).detailCode, 'INVALID_DIAGNOSTIC_RESULT');
+  });
+
+  test('диагностики с двоеточиями не сталкиваются между модулями', async () => {
+    const registry = new ExtensionRegistry();
+    const makeManifest = (id: string, diagnosticId: string): ModuleManifest => ({
+      id,
+      kind: 'core-extension',
+      contractVersion: '1.0.0',
+      displayName: id,
+      permissions: [],
+      uiContributions: [],
+      diagnostics: [{ id: diagnosticId, displayName: diagnosticId }],
+    });
+    assert.equal(registry.register(makeManifest('a:b', 'c'), async () => ({ status: 'ok', detailCode: 'A', durationMs: 0 })).ok, true);
+    assert.equal(registry.register(makeManifest('a', 'b:c'), async () => ({ status: 'ok', detailCode: 'B', durationMs: 0 })).ok, true);
+    assert.equal((await registry.runDiagnostic('a:b', 'c')).detailCode, 'A');
+    assert.equal((await registry.runDiagnostic('a', 'b:c')).detailCode, 'B');
+  });
+
   test('отклонение невалидного раннера диагностик (не функция)', () => {
     const registry = new ExtensionRegistry();
     const manifest: ModuleManifest = {

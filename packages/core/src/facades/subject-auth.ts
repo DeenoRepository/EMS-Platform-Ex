@@ -5,6 +5,7 @@ import type { Queryable } from '../persistence/db.js';
 import { SessionRepository, type SessionRow } from '../persistence/session.repository.js';
 import { EmployeeRepository, type EmployeeRow } from '../persistence/employee.repository.js';
 import { RoleRepository } from '../persistence/role.repository.js';
+import { dependencyFailure } from './errors.js';
 
 export function hashCredential(value: string): string {
   return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
@@ -37,7 +38,12 @@ export async function verifySubjectCredential(
 
   const hash = hashCredential(credential.value);
   const sessionRepo = new SessionRepository();
-  const session = await sessionRepo.findActiveByCredentialHash(q, hash);
+  let session: SessionRow | null;
+  try {
+    session = await sessionRepo.findActiveByCredentialHash(q, hash);
+  } catch {
+    return fail(dependencyFailure('Ошибка базы данных при проверке сессии'));
+  }
   if (!session) {
     return fail({
       code: 'UNAUTHENTICATED',
@@ -47,7 +53,12 @@ export async function verifySubjectCredential(
   }
 
   const employeeRepo = new EmployeeRepository();
-  const employee = await employeeRepo.findById(q, session.employee_id);
+  let employee: EmployeeRow | null;
+  try {
+    employee = await employeeRepo.findById(q, session.employee_id);
+  } catch {
+    return fail(dependencyFailure('Ошибка базы данных при проверке сотрудника'));
+  }
   if (!employee) {
     return fail({
       code: 'UNAUTHENTICATED',
@@ -73,8 +84,14 @@ export async function verifySubjectCredential(
   }
 
   const roleRepo = new RoleRepository();
-  const roleIds = await employeeRepo.getRolesForEmployee(q, employee.id);
-  const permissions = await roleRepo.getPermissionsForRoles(q, roleIds);
+  let roleIds: readonly string[];
+  let permissions: readonly string[];
+  try {
+    roleIds = await employeeRepo.getRolesForEmployee(q, employee.id);
+    permissions = await roleRepo.getPermissionsForRoles(q, roleIds);
+  } catch {
+    return fail(dependencyFailure('Ошибка базы данных при проверке полномочий'));
+  }
 
   return ok({
     session,

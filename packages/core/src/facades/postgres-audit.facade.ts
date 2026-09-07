@@ -10,6 +10,17 @@ import { ok, fail } from '@ems/contracts';
 import type { DatabasePool } from '../persistence/db.js';
 import { AuditRepository, type AuditRecordRow } from '../persistence/audit.repository.js';
 import { verifySubjectCredential, isValidCredentialFormat } from './subject-auth.js';
+import { dependencyFailure } from './errors.js';
+
+function isStrictTimestamp(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match || Number.isNaN(Date.parse(value))) return false;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  return month >= 1 && month <= 12 && day >= 1 && day <= new Date(Date.UTC(year, month, 0)).getUTCDate();
+}
 
 export class PostgresAuditFacade implements AuditFacade {
   private readonly auditRepo = new AuditRepository();
@@ -45,7 +56,7 @@ export class PostgresAuditFacade implements AuditFacade {
     }
 
     if (input.periodStart !== undefined) {
-      if (typeof input.periodStart !== 'string' || isNaN(Date.parse(input.periodStart))) {
+      if (!isStrictTimestamp(input.periodStart)) {
         return fail({
           code: 'VALIDATION_FAILED',
           message: 'Параметр periodStart должен быть корректной датой ISO',
@@ -55,7 +66,7 @@ export class PostgresAuditFacade implements AuditFacade {
     }
 
     if (input.periodEnd !== undefined) {
-      if (typeof input.periodEnd !== 'string' || isNaN(Date.parse(input.periodEnd))) {
+      if (!isStrictTimestamp(input.periodEnd)) {
         return fail({
           code: 'VALIDATION_FAILED',
           message: 'Параметр periodEnd должен быть корректной датой ISO',
@@ -83,10 +94,15 @@ export class PostgresAuditFacade implements AuditFacade {
     }
 
     // 2. Аутентификация и авторизация субъекта (требуется audit.view, активный сотрудник с отделом)
-    const authRes = await verifySubjectCredential(this.pool, input.actorCredential, {
-      requireActive: true,
-      requireDepartment: true,
-    });
+    let authRes: Awaited<ReturnType<typeof verifySubjectCredential>>;
+    try {
+      authRes = await verifySubjectCredential(this.pool, input.actorCredential, {
+        requireActive: true,
+        requireDepartment: true,
+      });
+    } catch {
+      return fail(dependencyFailure('Ошибка базы данных при проверке доступа к аудиту'));
+    }
     if (!authRes.ok) {
       return fail(authRes.error);
     }

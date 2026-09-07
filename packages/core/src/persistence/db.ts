@@ -58,7 +58,11 @@ export class DatabasePool {
       await client.query('COMMIT');
       return result;
     } catch (err) {
-      await client.query('ROLLBACK');
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Preserve the operation failure; rollback failure is infrastructure noise.
+      }
       throw err;
     } finally {
       client.release();

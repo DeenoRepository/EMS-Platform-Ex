@@ -32,6 +32,14 @@ export class EmployeeRepository {
     return res.rows[0] ?? null;
   }
 
+  async findByIdForUpdate(q: Queryable, id: string): Promise<EmployeeRow | null> {
+    const res = await q.query<EmployeeRow>(
+      'SELECT id, directory_id, object_guid, upn, display_name, status, department_id, version, created_at::text, updated_at::text FROM ems_core.employees WHERE id = $1 FOR UPDATE',
+      [id],
+    );
+    return res.rows[0] ?? null;
+  }
+
   async findByDirectoryGuid(
     q: Queryable,
     directoryId: string,
@@ -39,6 +47,18 @@ export class EmployeeRepository {
   ): Promise<EmployeeRow | null> {
     const res = await q.query<EmployeeRow>(
       'SELECT id, directory_id, object_guid, upn, display_name, status, department_id, version, created_at::text, updated_at::text FROM ems_core.employees WHERE directory_id = $1 AND object_guid = $2',
+      [directoryId, objectGuid],
+    );
+    return res.rows[0] ?? null;
+  }
+
+  async findByDirectoryGuidForUpdate(
+    q: Queryable,
+    directoryId: string,
+    objectGuid: string,
+  ): Promise<EmployeeRow | null> {
+    const res = await q.query<EmployeeRow>(
+      'SELECT id, directory_id, object_guid, upn, display_name, status, department_id, version, created_at::text, updated_at::text FROM ems_core.employees WHERE directory_id = $1 AND object_guid = $2 FOR UPDATE',
       [directoryId, objectGuid],
     );
     return res.rows[0] ?? null;
@@ -63,7 +83,7 @@ export class EmployeeRepository {
       readonly departmentId?: string;
     },
   ): Promise<EmployeeRow> {
-    let row = await this.findByDirectoryGuid(q, data.directoryId, data.objectGuid);
+    let row = await this.findByDirectoryGuidForUpdate(q, data.directoryId, data.objectGuid);
     if (row) {
       if (row.upn !== data.upn || row.display_name !== data.displayName) {
         const updateRes = await q.query<EmployeeRow>(
@@ -97,7 +117,7 @@ export class EmployeeRepository {
       ],
     );
 
-    row = await this.findByDirectoryGuid(q, data.directoryId, data.objectGuid);
+    row = await this.findByDirectoryGuidForUpdate(q, data.directoryId, data.objectGuid);
     if (!row) {
       throw new Error('Failed to get or create employee identity');
     }
