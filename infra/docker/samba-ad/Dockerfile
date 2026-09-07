@@ -19,7 +19,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     procps \
     && rm -rf /var/lib/apt/lists/*
 
-COPY smb.conf.template /etc/samba/smb.conf.template
 COPY seed-users.sh /usr/local/bin/seed-users.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 

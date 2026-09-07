@@ -1,7 +1,7 @@
 # PowerShell script to stop and tear down EMS Platform Local Docker Stand
 [CmdletBinding()]
 param(
-    [switch]$KeepVolumes
+    [switch]$PurgeVolumes
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,11 +12,11 @@ Write-Host "=== EMS Platform: Stopping Local Docker Stand ===" -ForegroundColor 
 Set-Location -LiteralPath $DockerDir
 
 $ArgsList = @("compose", "down")
-if (-not $KeepVolumes) {
-    Write-Host "Removing volumes for clean state..." -ForegroundColor Yellow
+if ($PurgeVolumes) {
+    Write-Host "Purging persistent data volumes (-PurgeVolumes specified)..." -ForegroundColor Yellow
     $ArgsList += "-v"
 } else {
-    Write-Host "Preserving data volumes (-KeepVolumes specified)..." -ForegroundColor DarkGray
+    Write-Host "Preserving data volumes (use -PurgeVolumes to wipe database/directory volumes)..." -ForegroundColor DarkGray
 }
 
 & docker @ArgsList

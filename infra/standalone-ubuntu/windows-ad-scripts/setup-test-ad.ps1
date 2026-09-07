@@ -5,6 +5,7 @@
 [CmdletBinding()]
 param(
     [string]$DomainDN = "DC=corp,DC=local",
+    [string]$ContainerDN = "CN=Users,DC=corp,DC=local",
     [string]$ExportCertPath = "C:\EMS\TestRootCA.crt"
 )
 
@@ -19,13 +20,15 @@ if (-not (Get-Module -ListAvailable -Name ActiveDirectory)) {
 }
 Import-Module ActiveDirectory
 
-# 2. Create Organizational Unit for EMS
-$OUPath = "OU=EMS_Users,$DomainDN"
-if (-not (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$OUPath'" -ErrorAction SilentlyContinue)) {
-    Write-Host "Creating Organizational Unit: $OUPath..." -ForegroundColor Yellow
-    New-ADOrganizationalUnit -Name "EMS_Users" -Path $DomainDN -ProtectedFromAccidentalDeletion $false
-} else {
-    Write-Host "[OK] Organizational Unit '$OUPath' already exists." -ForegroundColor DarkGray
+# 2. Verify or create container
+$TargetContainer = $ContainerDN
+if ($TargetContainer -like "OU=*") {
+    if (-not (Get-ADOrganizationalUnit -Filter "DistinguishedName -eq '$TargetContainer'" -ErrorAction SilentlyContinue)) {
+        $ouName = ($TargetContainer -split ",")[0] -replace "^OU=", ""
+        $parentDN = ($TargetContainer -split ",", 2)[1]
+        Write-Host "Creating Organizational Unit: $TargetContainer..." -ForegroundColor Yellow
+        New-ADOrganizationalUnit -Name $ouName -Path $parentDN -ProtectedFromAccidentalDeletion $false
+    }
 }
 
 # 3. Helper to create or reset synthetic users
@@ -54,7 +57,7 @@ function New-OrUpdate-SyntheticUser {
                    -AccountPassword $secPass `
                    -Enabled $Enabled `
                    -PasswordNeverExpires $true `
-                   -Path $OUPath
+                   -Path $TargetContainer
     } else {
         Write-Host "Updating user: $SamAccountName..." -ForegroundColor DarkGray
         Set-ADUser -Identity $existing -DisplayName $DisplayName -GivenName $GivenName -Surname $Surname -Enabled $Enabled -PasswordNeverExpires $true
@@ -94,15 +97,15 @@ New-OrUpdate-SyntheticUser -SamAccountName "blocked-user" `
                            -Password "Blocked_Pass_Secret123!" -Enabled $false
 
 # 5. Provision Groups
-$AdminsGroup = "CN=EMS_Admins,$OUPath"
+$AdminsGroup = "CN=EMS_Admins,$TargetContainer"
 if (-not (Get-ADGroup -Filter "DistinguishedName -eq '$AdminsGroup'" -ErrorAction SilentlyContinue)) {
-    New-ADGroup -Name "EMS_Admins" -GroupScope Global -Path $OUPath -Description "Группа администраторов EMS"
+    New-ADGroup -Name "EMS_Admins" -GroupScope Global -Path $TargetContainer -Description "Группа администраторов EMS"
 }
 Add-ADGroupMember -Identity "EMS_Admins" -Members "bootstrap-admin" -ErrorAction SilentlyContinue
 
-$UsersGroup = "CN=EMS_Users,$OUPath"
+$UsersGroup = "CN=EMS_Users,$TargetContainer"
 if (-not (Get-ADGroup -Filter "DistinguishedName -eq '$UsersGroup'" -ErrorAction SilentlyContinue)) {
-    New-ADGroup -Name "EMS_Users" -GroupScope Global -Path $OUPath -Description "Группа пользователей EMS"
+    New-ADGroup -Name "EMS_Users" -GroupScope Global -Path $TargetContainer -Description "Группа пользователей EMS"
 }
 Add-ADGroupMember -Identity "EMS_Users" -Members @("regular-user", "pending-user") -ErrorAction SilentlyContinue
 

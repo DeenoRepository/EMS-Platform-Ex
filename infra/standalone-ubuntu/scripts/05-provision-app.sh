@@ -67,14 +67,30 @@ EOF
             APPLIED=$(PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -t -A -c "SELECT COUNT(1) FROM ems_core.schema_migrations WHERE version = '$mig';")
             if [[ "$APPLIED" == "0" ]]; then
                 echo "  Applying migration $mig..."
-                PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -v ON_ERROR_STOP=1 -f "$SQL_FILE"
                 CHECKSUM=$(sha256sum "$SQL_FILE" | awk '{print $1}')
-                PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -c "INSERT INTO ems_core.schema_migrations (version, checksum) VALUES ('$mig', '$CHECKSUM');"
+                PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" \
+                    -v ON_ERROR_STOP=1 --single-transaction <<MIG_EOF
+\i $SQL_FILE
+INSERT INTO ems_core.schema_migrations (version, checksum) VALUES ('$mig', '$CHECKSUM');
+MIG_EOF
             else
                 echo "  Migration $mig already applied."
             fi
         fi
     done
+
+    # Clean stand provisioning: if no platform administrator exists yet, ensure bootstrap_state is 'ready' for initial admin setup
+    ADMIN_EXISTS=$(PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -t -A -c "
+        SELECT COUNT(1) FROM ems_core.employee_roles er
+        JOIN ems_core.employees e ON e.id = er.employee_id
+        WHERE er.role_id = 'role.platform.admin' AND e.status = 'ACTIVE';")
+    if [[ "$ADMIN_EXISTS" == "0" ]]; then
+        echo "Clean stand detected (no active admins). Initializing bootstrap_state to 'ready'..."
+        PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -v ON_ERROR_STOP=1 -c "
+            INSERT INTO ems_core.bootstrap_state (id, status)
+            VALUES (1, 'ready')
+            ON CONFLICT (id) DO UPDATE SET status = 'ready', updated_at = NOW();"
+    fi
 else
     echo "WARNING: Migrations directory not found at $MIGRATIONS_DIR. Skipping direct SQL application."
 fi
@@ -90,7 +106,8 @@ sleep 2
 if systemctl is-active --quiet ems-web.service; then
     echo "[OK] ems-web service is active and running."
 else
-    echo "WARNING: ems-web service failed to enter active state. Check logs with: journalctl -u ems-web -n 50"
+    echo "ERROR: ems-web service failed to enter active state. Check logs with: journalctl -u ems-web -n 50" >&2
+    exit 1
 fi
 
 echo "=== [05] Application Provisioning Complete ==="
