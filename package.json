@@ -1,0 +1,17 @@
+{
+  "name": "ems-platform",
+  "version": "0.1.0",
+  "private": true,
+  "description": "EMS Platform - Enterprise Manufacturing System",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "clean": "tsc -b --clean",
+    "test": "pnpm -r run test"
+  },
+  "packageManager": "pnpm@11.16.0",
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "typescript": "^5.9.3"
+  }
+}

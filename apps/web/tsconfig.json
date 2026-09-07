@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "jsx": "react-jsx"
+  },
+  "references": [
+    { "path": "../../packages/contracts" },
+    { "path": "../../packages/core" },
+    { "path": "../../packages/shell" },
+    { "path": "../../packages/shared-controls" },
+    { "path": "../../packages/demo-module" },
+    { "path": "../../packages/diagnostic-extension" }
+  ],
+  "include": ["src/**/*"]
+}

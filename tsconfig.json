@@ -1,0 +1,12 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/contracts" },
+    { "path": "packages/shared-controls" },
+    { "path": "packages/core" },
+    { "path": "packages/shell" },
+    { "path": "packages/demo-module" },
+    { "path": "packages/diagnostic-extension" },
+    { "path": "apps/web" }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "name": "@ems/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ems/contracts": "workspace:*",
+    "@ems/core": "workspace:*",
+    "@ems/shell": "workspace:*",
+    "@ems/shared-controls": "workspace:*",
+    "@ems/demo-module": "workspace:*",
+    "@ems/diagnostic-extension": "workspace:*"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "tsc && node --test dist/composition.test.js"
+  }
+}
