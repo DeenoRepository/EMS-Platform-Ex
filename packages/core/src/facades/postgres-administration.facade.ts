@@ -15,6 +15,7 @@ import { SessionRepository } from '../persistence/session.repository.js';
 import { AuditRepository } from '../persistence/audit.repository.js';
 import { ModuleAvailabilityRepository } from '../persistence/module-availability.repository.js';
 import { ADMIN_ROLE_ID } from './postgres-identity.facade.js';
+import { RoleRepository } from '../persistence/role.repository.js';
 
 export class PostgresAdministrationFacade implements AdministrationFacade {
   private readonly employeeRepo = new EmployeeRepository();
@@ -22,11 +23,21 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
   private readonly sessionRepo = new SessionRepository();
   private readonly auditRepo = new AuditRepository();
   private readonly moduleAvailabilityRepo = new ModuleAvailabilityRepository();
+  private readonly roleRepo = new RoleRepository();
+  private readonly authorizationPermission = 'employees.manage';
 
   constructor(private readonly pool: DatabasePool) {}
 
   async assignEmployee(input: AssignEmployeeInput): Promise<Result<AssignEmployeeOutput>> {
     return await this.pool.withTransaction(async (client) => {
+      const actor = await this.sessionRepo.findActiveById(client, input.actorCredential.value);
+      if (!actor) return fail({ code: 'UNAUTHENTICATED', message: 'Сессия оператора недействительна', retryable: false });
+      const actorRoles = await this.employeeRepo.getRolesForEmployee(client, actor.employee_id);
+      const actorPermissions = await this.roleRepo.getPermissionsForRoles(client, actorRoles);
+      if (!actorPermissions.includes(this.authorizationPermission)) {
+        return fail({ code: 'FORBIDDEN', message: 'Недостаточно прав для назначения сотрудников', retryable: false });
+      }
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('ems_core.active_admins'))");
       const employee = await this.employeeRepo.findById(client, input.employeeId);
       if (!employee) {
         return fail({
@@ -88,7 +99,7 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
       // Запись аудита перевода с сохранением исторического контекста (FR-020, FR-026)
       await this.auditRepo.insert(client, {
         id: crypto.randomUUID(),
-        subjectId: 'admin-action', // или контекстный оператор
+        subjectId: actor.employee_id,
         action: 'ASSIGN_EMPLOYEE',
         objectType: 'employee',
         objectId: employee.id,
@@ -116,6 +127,13 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
     input: SetModuleAvailabilityInput,
   ): Promise<Result<SetModuleAvailabilityOutput>> {
     return await this.pool.withTransaction(async (client) => {
+      const actor = await this.sessionRepo.findActiveById(client, input.actorCredential.value);
+      if (!actor) return fail({ code: 'UNAUTHENTICATED', message: 'Сессия оператора недействительна', retryable: false });
+      const actorRoles = await this.employeeRepo.getRolesForEmployee(client, actor.employee_id);
+      const actorPermissions = await this.roleRepo.getPermissionsForRoles(client, actorRoles);
+      if (!actorPermissions.includes('platform.admin')) {
+        return fail({ code: 'FORBIDDEN', message: 'Недостаточно прав для изменения доступности модулей', retryable: false });
+      }
       const dept = await this.departmentRepo.findById(client, input.departmentId);
       if (!dept) {
         return fail({
@@ -135,7 +153,7 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
       // Запись аудита изменения доступности модуля (FR-026)
       await this.auditRepo.insert(client, {
         id: crypto.randomUUID(),
-        subjectId: 'admin-action',
+        subjectId: actor.employee_id,
         action: 'SET_MODULE_AVAILABILITY',
         objectType: 'module_availability',
         objectId: `${input.moduleId}:${input.departmentId}`,

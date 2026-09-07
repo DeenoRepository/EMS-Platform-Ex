@@ -29,7 +29,7 @@ export interface AuditQueryFilter {
   readonly periodEnd?: string;
   readonly action?: string;
   readonly subjectId?: string;
-  readonly cursor?: string; // timestamp ISO string for pagination
+  readonly cursor?: string; // base64url(JSON({ timestamp, id }))
   readonly limit?: number;
 }
 
@@ -79,8 +79,21 @@ export class AuditRepository {
       values.push(filter.subjectId);
     }
     if (filter.cursor) {
-      conditions.push(`timestamp < $${paramIndex++}`);
-      values.push(filter.cursor);
+      let cursor: { timestamp: string; id: string };
+      try {
+        const decoded = Buffer.from(filter.cursor, 'base64url').toString('utf8');
+        const parsed: unknown = JSON.parse(decoded);
+        if (
+          typeof parsed !== 'object' || parsed === null ||
+          typeof (parsed as { timestamp?: unknown }).timestamp !== 'string' ||
+          typeof (parsed as { id?: unknown }).id !== 'string'
+        ) throw new Error('invalid cursor');
+        cursor = parsed as { timestamp: string; id: string };
+      } catch {
+        throw new Error('Invalid audit cursor');
+      }
+      conditions.push(`(timestamp, id) < ($${paramIndex++}, $${paramIndex++})`);
+      values.push(cursor.timestamp, cursor.id);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -91,14 +104,17 @@ export class AuditRepository {
       SELECT id, timestamp::text, subject_id, action, object_type, object_id, result, correlation_id, details
       FROM ems_core.audit_log
       ${whereClause}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, id DESC
       LIMIT $${paramIndex}
     `;
 
     const res = await q.query<AuditRecordRow>(sql, values);
     const hasMore = res.rows.length > limit;
     const items = hasMore ? res.rows.slice(0, limit) : res.rows;
-    const nextCursor = hasMore && items.length > 0 ? items[items.length - 1]?.timestamp : undefined;
+    const last = items[items.length - 1];
+    const nextCursor = hasMore && last
+      ? Buffer.from(JSON.stringify({ timestamp: last.timestamp, id: last.id }), 'utf8').toString('base64url')
+      : undefined;
 
     return { items, nextCursor };
   }

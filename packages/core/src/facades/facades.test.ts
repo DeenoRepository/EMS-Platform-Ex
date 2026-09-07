@@ -164,6 +164,9 @@ class MockDatabasePool {
     if (cleanSql.includes('FROM ems_core.sessions WHERE id = $1 AND revoked_at IS NULL')) {
       const s = this.sessions.get(params[0]);
       if (s && !s.revoked_at) {
+        if (new Date(s.expires_at) <= new Date() || new Date(s.idle_expires_at) <= new Date()) {
+          return { rows: [], rowCount: 0 };
+        }
         return { rows: [s], rowCount: 1 };
       }
       return { rows: [], rowCount: 0 };
@@ -246,6 +249,14 @@ describe('Postgres Core Facades integration tests', () => {
         displayName: `Display Name for ${upn}`,
       });
     },
+    async resolveIdentity(upn) {
+      return ok({
+        directoryId: 'corp.local',
+        objectGuid: `guid-${upn}`,
+        upn,
+        displayName: `Display Name for ${upn}`,
+      });
+    },
   };
 
   test('bootstrap создает отдел, роль администратора и сотрудника (FR-009..FR-012)', async () => {
@@ -314,6 +325,7 @@ describe('Postgres Core Facades integration tests', () => {
 
     // Ожидающий сотрудник не получает доступ (FR-005)
     const checkPending = await authzFacade.authorize({
+      credential: { value: loginRes.value.session.sessionId },
       sessionContext: loginRes.value.session,
       permission: 'demo-catalog.view',
     });
@@ -358,6 +370,7 @@ describe('Postgres Core Facades integration tests', () => {
 
     // Назначаем сотрудника в отдел производства
     const assignRes = await adminFacade.assignEmployee({
+      actorCredential: { value: ((await identityFacade.login({ upn: 'admin@corp.local', password: 'correct-password' })) as any).value.session.sessionId },
       employeeId: empId,
       departmentId: 'dept-prod',
       roleIds: [ADMIN_ROLE_ID],
@@ -367,6 +380,7 @@ describe('Postgres Core Facades integration tests', () => {
 
     // Проверяем, что старая сессия сотрудника была отозвана (FR-020)
     const authWithOldSession = await authzFacade.authorize({
+      credential: { value: loginRes.value.session.sessionId },
       sessionContext: loginRes.value.session,
       permission: 'platform.admin',
     });
@@ -397,6 +411,7 @@ describe('Postgres Core Facades integration tests', () => {
 
     // Пытаемся забрать роль администратора у единственного активного администратора
     const tryRemoveAdmin = await adminFacade.assignEmployee({
+      actorCredential: { value: ((await identityFacade.login({ upn: 'only-admin@corp.local', password: 'password' })) as any).value.session.sessionId },
       employeeId: boot.value.employeeId,
       departmentId: 'dept-platform',
       roleIds: [], // без роли админа!
@@ -422,12 +437,14 @@ describe('Postgres Core Facades integration tests', () => {
     if (!loginRes.ok) return;
 
     const logoutRes = await sessionFacade.logout({
+      actorCredential: { value: loginRes.value.session.sessionId },
       sessionId: loginRes.value.session.sessionId,
     });
     assert.equal(logoutRes.ok, true);
 
     // Повторный logout возвращает NOT_FOUND_OR_FORBIDDEN
     const secondLogout = await sessionFacade.logout({
+      actorCredential: { value: loginRes.value.session.sessionId },
       sessionId: loginRes.value.session.sessionId,
     });
     assert.equal(secondLogout.ok, false);
@@ -438,7 +455,21 @@ describe('Postgres Core Facades integration tests', () => {
 
   test('просмотр журнала аудита сам записывается в аудит (AuditFacade, FR-030)', async () => {
     const mockDb = new MockDatabasePool() as any;
+    const identityFacade = new PostgresIdentityFacade(mockDb, fakeLdap);
     const auditFacade = new PostgresAuditFacade(mockDb);
+
+    await identityFacade.bootstrap({
+      operatorId: 'operator-001',
+      upn: 'audit-admin@corp.local',
+      initialDepartmentId: 'dept-platform',
+    });
+
+    const loginRes = await identityFacade.login({
+      upn: 'audit-admin@corp.local',
+      password: 'password',
+    });
+    assert.equal(loginRes.ok, true);
+    if (!loginRes.ok) return;
 
     // Добавляем тестовую запись
     mockDb.auditLog.push({
@@ -454,7 +485,7 @@ describe('Postgres Core Facades integration tests', () => {
     });
 
     const queryRes = await auditFacade.query({
-      subjectId: 'admin-viewer',
+      actorCredential: { value: loginRes.value.session.sessionId },
     });
 
     assert.equal(queryRes.ok, true);
@@ -465,6 +496,6 @@ describe('Postgres Core Facades integration tests', () => {
     // Проверяем, что просмотр залогирован
     const viewAudit = mockDb.auditLog.find((a: any) => a.action === 'AUDIT_QUERY_VIEWED');
     assert.ok(viewAudit, 'Просмотр журнала должен аудироваться согласно FR-030');
-    assert.equal(viewAudit.subject_id, 'admin-viewer');
+    assert.equal(viewAudit.subject_id, loginRes.value.session.employeeId);
   });
 });

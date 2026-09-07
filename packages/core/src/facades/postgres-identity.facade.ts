@@ -23,6 +23,12 @@ export interface LdapAuthenticator {
     upn: string;
     displayName: string;
   }>>;
+  resolveIdentity(upn: string): Promise<Result<{
+    directoryId: string;
+    objectGuid: string;
+    upn: string;
+    displayName: string;
+  }>>;
 }
 
 export const ADMIN_ROLE_ID = 'role.platform.admin';
@@ -117,8 +123,8 @@ export class PostgresIdentityFacade implements IdentityFacade {
         id: crypto.randomUUID(),
         subjectId: employee.id,
         action: 'LOGIN',
-        objectType: 'session',
-        objectId: sessionId,
+        objectType: 'employee',
+        objectId: employee.id,
         result: 'SUCCESS',
       });
 
@@ -149,6 +155,7 @@ export class PostgresIdentityFacade implements IdentityFacade {
 
     return await this.pool.withTransaction(async (client) => {
       // Проверяем инвариант единственного bootstrap: если администраторы уже есть, отклоняем (FR-012)
+      await client.query("SELECT pg_advisory_xact_lock(hashtext('ems_core.bootstrap'))");
       const existingAdmins = await this.employeeRepo.countActiveAdmins(client, ADMIN_ROLE_ID);
       if (existingAdmins > 0) {
         return fail({
@@ -183,15 +190,23 @@ export class PostgresIdentityFacade implements IdentityFacade {
         );
       }
 
-      // Ищем или создаем сотрудника для первого администратора
-      let employee = await this.employeeRepo.findByUpn(client, input.upn);
+      const ldapIdentity = await this.ldapAuthenticator.resolveIdentity(input.upn);
+      if (!ldapIdentity.ok) return fail(ldapIdentity.error);
+
+      await client.query(
+        'SELECT pg_advisory_xact_lock(hashtext($1))',
+        [`${ldapIdentity.value.directoryId}:${ldapIdentity.value.objectGuid}`],
+      );
+
+      // Ищем или создаем сотрудника по подтвержденной AD-личности
+      let employee = await this.employeeRepo.findByDirectoryGuid(client, ldapIdentity.value.directoryId, ldapIdentity.value.objectGuid);
       if (!employee) {
         employee = await this.employeeRepo.create(client, {
           id: crypto.randomUUID(),
-          directoryId: 'bootstrap-dir',
-          objectGuid: crypto.randomUUID(),
-          upn: input.upn,
-          displayName: 'Первый администратор',
+          directoryId: ldapIdentity.value.directoryId,
+          objectGuid: ldapIdentity.value.objectGuid,
+          upn: ldapIdentity.value.upn,
+          displayName: ldapIdentity.value.displayName,
           status: 'ACTIVE',
           departmentId: dept.id,
         }, [ADMIN_ROLE_ID]);
@@ -207,7 +222,7 @@ export class PostgresIdentityFacade implements IdentityFacade {
       // Запись аудита bootstrap (FR-010, FR-026)
       await this.auditRepo.insert(client, {
         id: crypto.randomUUID(),
-        subjectId: input.operatorId,
+         subjectId: input.operatorId,
         action: 'BOOTSTRAP',
         objectType: 'employee',
         objectId: employee.id,

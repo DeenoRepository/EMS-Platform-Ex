@@ -12,6 +12,10 @@ export interface SessionContext {
   readonly isBlocked: boolean;
 }
 
+export interface SessionCredential {
+  readonly value: string;
+}
+
 export interface LoginInput {
   readonly upn: string;
   readonly password: string;
@@ -34,6 +38,7 @@ export interface BootstrapOutput {
 }
 
 export interface AuthorizeInput {
+  readonly credential: SessionCredential;
   readonly sessionContext: SessionContext;
   readonly permission: string;
   readonly resourceScope?: string;
@@ -46,6 +51,7 @@ export interface AuthorizeOutput {
 }
 
 export interface AssignEmployeeInput {
+  readonly actorCredential: SessionCredential;
   readonly employeeId: string;
   readonly departmentId: string;
   readonly roleIds: readonly string[];
@@ -60,6 +66,7 @@ export interface AssignEmployeeOutput {
 }
 
 export interface SetModuleAvailabilityInput {
+  readonly actorCredential: SessionCredential;
   readonly moduleId: string;
   readonly departmentId: string;
   readonly enabled: boolean;
@@ -73,6 +80,7 @@ export interface SetModuleAvailabilityOutput {
 }
 
 export interface AuditQueryInput {
+  readonly actorCredential: SessionCredential;
   readonly periodStart?: string;
   readonly periodEnd?: string;
   readonly action?: string;
@@ -99,6 +107,7 @@ export interface AuditQueryOutput {
 }
 
 export interface LogoutInput {
+  readonly actorCredential: SessionCredential;
   readonly sessionId: string;
 }
 

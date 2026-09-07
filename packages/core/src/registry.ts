@@ -27,6 +27,13 @@ export class ExtensionRegistry {
     manifest: ModuleManifest,
     runner?: DiagnosticRunner,
   ): Result<void> {
+    if (!this.isManifestShapeValid(manifest)) {
+      return fail({
+        code: 'VALIDATION_FAILED',
+        message: 'Манифест модуля имеет недопустимую структуру',
+        retryable: false,
+      });
+    }
     if (!manifest.id || manifest.id.trim().length === 0) {
       return fail({
         code: 'VALIDATION_FAILED',
@@ -227,7 +234,15 @@ export class ExtensionRegistry {
       });
 
       const runnerPromise = runner(diagnosticId);
-      return await Promise.race([runnerPromise, timeoutPromise]);
+      const result = await Promise.race([runnerPromise, timeoutPromise]);
+      if (!this.isDiagnosticResult(result)) {
+        return {
+          status: 'error',
+          detailCode: 'INVALID_DIAGNOSTIC_RESULT',
+          durationMs: Date.now() - start,
+        };
+      }
+      return result;
     } catch {
       return {
         status: 'error',
@@ -239,5 +254,22 @@ export class ExtensionRegistry {
         clearTimeout(timerId);
       }
     }
+  }
+
+  private isManifestShapeValid(manifest: ModuleManifest): boolean {
+    if (!manifest || typeof manifest !== 'object') return false;
+    if (typeof manifest.id !== 'string' || typeof manifest.kind !== 'string' || typeof manifest.contractVersion !== 'string' || typeof manifest.displayName !== 'string') return false;
+    if (!Array.isArray(manifest.permissions) || !Array.isArray(manifest.uiContributions)) return false;
+    if (manifest.kind !== 'business-module' && manifest.kind !== 'core-extension') return false;
+    if (manifest.diagnostics !== undefined && !Array.isArray(manifest.diagnostics)) return false;
+    if (manifest.permissions.some((permission) => !permission || typeof permission.id !== 'string' || typeof permission.displayName !== 'string')) return false;
+    if (manifest.uiContributions.some((contribution) => !contribution || typeof contribution.id !== 'string' || typeof contribution.targetSlot !== 'string' || typeof contribution.label !== 'string' || typeof contribution.path !== 'string' || (contribution.requiredPermission !== undefined && typeof contribution.requiredPermission !== 'string'))) return false;
+    return !manifest.diagnostics?.some((diagnostic) => !diagnostic || typeof diagnostic.id !== 'string' || typeof diagnostic.displayName !== 'string');
+  }
+
+  private isDiagnosticResult(value: DiagnosticResult): value is DiagnosticResult {
+    return Boolean(value) && typeof value === 'object' &&
+      (value.status === 'ok' || value.status === 'error' || value.status === 'timeout') &&
+      typeof value.detailCode === 'string' && Number.isFinite(value.durationMs) && value.durationMs >= 0;
   }
 }

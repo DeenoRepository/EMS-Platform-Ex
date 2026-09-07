@@ -18,11 +18,7 @@ export class ModuleAvailabilityRepository {
        WHERE module_id = $1 AND department_id = $2`,
       [moduleId, departmentId],
     );
-    if (res.rows.length === 0) {
-      // По умолчанию для MVP модуль доступен, если не отключен явно
-      return true;
-    }
-    return res.rows[0]?.enabled ?? true;
+    return res.rows[0]?.enabled ?? false;
   }
 
   async setAvailability(

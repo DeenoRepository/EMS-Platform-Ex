@@ -20,10 +20,10 @@ export class PostgresAuthorizationFacade implements AuthorizationFacade {
   constructor(private readonly pool: DatabasePool) {}
 
   async authorize(input: AuthorizeInput): Promise<Result<AuthorizeOutput>> {
-    const { sessionContext, permission, moduleId } = input;
+    const { credential, sessionContext, permission, moduleId, resourceScope } = input;
 
     // Читаем актуальное состояние из БД PostgreSQL, а не доверяем клиентским утверждениям (FR-016, NFR-003)
-    const session = await this.sessionRepo.findActiveById(this.pool, sessionContext.sessionId);
+    const session = await this.sessionRepo.findActiveById(this.pool, credential.value);
     if (!session) {
       return fail({
         code: 'UNAUTHENTICATED',
@@ -46,6 +46,14 @@ export class PostgresAuthorizationFacade implements AuthorizationFacade {
         allowed: false,
         reason: `Сотрудник находится в статусе '${employee.status}', защищенные операции запрещены (FR-005, FR-006)`,
       });
+    }
+
+    if (session.id !== sessionContext.sessionId || session.employee_id !== sessionContext.employeeId) {
+      return fail({ code: 'UNAUTHENTICATED', message: 'Контекст сессии не соответствует учетной записи', retryable: false });
+    }
+
+    if (resourceScope !== undefined) {
+      return ok({ allowed: false, reason: `Область ресурса '${resourceScope}' не поддерживается` });
     }
 
     if (!employee.department_id) {
