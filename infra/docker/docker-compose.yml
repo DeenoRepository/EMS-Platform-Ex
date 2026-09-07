@@ -1,0 +1,72 @@
+services:
+  postgres:
+    build:
+      context: ./postgres
+      dockerfile: Dockerfile
+    container_name: ems-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_master_secret}
+      POSTGRES_DB: ${POSTGRES_USER:-postgres}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  samba-ad:
+    build:
+      context: ./samba-ad
+      dockerfile: Dockerfile
+    container_name: ems-samba-ad
+    environment:
+      SAMBA_REALM: ${SAMBA_REALM:-CORP.LOCAL}
+      SAMBA_DOMAIN: ${SAMBA_DOMAIN:-CORP}
+      SAMBA_ADMIN_PASSWORD: ${SAMBA_ADMIN_PASSWORD:-Admin_Secret_Pass123!}
+    cap_add:
+      - SYS_ADMIN
+    ports:
+      - "${SAMBA_LDAP_PORT:-389}:389"
+      - "${SAMBA_LDAPS_PORT:-636}:636"
+      - "${SAMBA_KRB_PORT:-88}:88"
+    volumes:
+      - samba_data:/var/lib/samba
+      - ../certs:/etc/samba/certs:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 636 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: ems-nginx
+    ports:
+      - "${NGINX_HTTP_PORT:-80}:80"
+      - "${NGINX_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ../certs:/etc/nginx/certs:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    name: ems_postgres_data
+  samba_data:
+    name: ems_samba_data

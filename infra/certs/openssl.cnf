@@ -1,0 +1,48 @@
+[ req ]
+default_bits        = 2048
+default_md          = sha256
+distinguished_name  = req_distinguished_name
+prompt              = no
+
+[ req_distinguished_name ]
+C  = RU
+ST = Moscow
+L  = Moscow
+O  = EMS Platform
+OU = Security
+CN = EMS Test Root CA
+
+[ v3_ca ]
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints       = critical, CA:TRUE
+keyUsage               = critical, digitalSignature, cRLSign, keyCertSign
+
+[ ldap_ext ]
+basicConstraints       = CA:FALSE
+nsCertType             = server
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid,issuer
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = serverAuth, clientAuth
+subjectAltName         = @ldap_san
+
+[ ldap_san ]
+DNS.1 = ldap.corp.local
+DNS.2 = corp.local
+DNS.3 = localhost
+IP.1  = 127.0.0.1
+
+[ web_ext ]
+basicConstraints       = CA:FALSE
+nsCertType             = server
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid,issuer
+keyUsage               = critical, digitalSignature, keyEncipherment
+extendedKeyUsage       = serverAuth
+subjectAltName         = @web_san
+
+[ web_san ]
+DNS.1 = ems.local
+DNS.2 = localhost
+IP.1  = 127.0.0.1

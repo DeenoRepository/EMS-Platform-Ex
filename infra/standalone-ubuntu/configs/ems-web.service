@@ -1,0 +1,40 @@
+[Unit]
+Description=EMS Platform Web Application Service (Next.js / Node.js)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=ems
+Group=ems
+WorkingDirectory=/opt/ems/app
+
+# Production environment variables (credentials, URLs, secrets)
+EnvironmentFile=/etc/ems/ems.env
+
+# Application entrypoint
+ExecStart=/usr/bin/node apps/web/server.js
+
+# Process management
+Restart=always
+RestartSec=5s
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+LimitNOFILE=65536
+
+# Security Sandbox & Hardening
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictRealtime=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ems-web
+
+[Install]
+WantedBy=multi-user.target

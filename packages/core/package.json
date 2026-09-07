@@ -19,7 +19,7 @@
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "tsc && node --test dist/registry.test.js dist/facades/facades.test.js dist/persistence/migrator.test.js dist/persistence/pg-integration.test.js",
-    "test:pg": "node ../../tools/require-pg-acceptance.mjs && tsc && EMS_TEST_PG_REQUIRED=true node --test dist/persistence/pg-integration.test.js"
+    "test:pg": "node ../../tools/require-pg-acceptance.mjs && tsc && node ../../tools/run-pg-test.mjs"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1"

@@ -1,0 +1,20 @@
+# ==============================================================================
+# EMS Platform: pg_hba.conf Access Control Rules Snippet
+# Append or include in: /etc/postgresql/16/main/pg_hba.conf
+# ==============================================================================
+
+# Database administrative login via local unix socket
+local   all             postgres                                peer
+
+# EMS application roles via local unix socket (scram-sha-256)
+local   ems_stand,ems_prod  ems_migration,ems_runtime           scram-sha-256
+
+# EMS application roles via IPv4 loopback (127.0.0.1/32)
+host    ems_stand,ems_prod  ems_migration,ems_runtime  127.0.0.1/32  scram-sha-256
+
+# EMS application roles via IPv6 loopback (::1/128)
+host    ems_stand,ems_prod  ems_migration,ems_runtime  ::1/128       scram-sha-256
+
+# Deny all other external connections by default
+host    all             all             0.0.0.0/0               reject
+host    all             all             ::/0                    reject
