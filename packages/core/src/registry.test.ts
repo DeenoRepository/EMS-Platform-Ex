@@ -222,4 +222,43 @@ describe('ExtensionRegistry contract tests', () => {
       assert.match(result.error.message, /UI-вклад 'nav\.orders' уже объявлен/);
     }
   });
+
+  test('мутация переданного объекта манифеста после регистрации не влияет на реестр (защитная копия)', () => {
+    const registry = new ExtensionRegistry();
+    const mutableManifest: ModuleManifest = {
+      id: 'test.module.mutable',
+      kind: 'business-module',
+      contractVersion: '1.0.0',
+      displayName: 'Оригинал',
+      permissions: [{ id: 'perm.mutable', displayName: 'Разрешение' }],
+      uiContributions: [{ id: 'nav.mutable', targetSlot: 'sidebar', label: 'Нав', path: '/nav' }],
+    };
+
+    const result = registry.register(mutableManifest);
+    assert.equal(result.ok, true);
+
+    // Пытаемся мутировать входной объект
+    (mutableManifest.permissions as any).push({ id: 'perm.injected', displayName: 'Внедренное' });
+
+    // Проверяем, что в реестре осталась защищенная копия
+    const registered = registry.getModule('test.module.mutable');
+    assert.equal(registered?.manifest.permissions.length, 1);
+    assert.equal(registered?.manifest.permissions[0]?.id, 'perm.mutable');
+    assert.deepEqual(registry.getAllPermissions(), ['perm.mutable']);
+  });
+
+  test('отклонение невалидного раннера диагностик (не функция)', () => {
+    const registry = new ExtensionRegistry();
+    const manifest: ModuleManifest = {
+      ...validManifest,
+      id: 'test.module.bad-runner-type',
+      diagnostics: [{ id: 'diag1', displayName: 'Диагностика' }],
+    };
+
+    const res = registry.register(manifest, 'not-a-function' as any);
+    assert.equal(res.ok, false);
+    if (!res.ok) {
+      assert.equal(res.error.code, 'VALIDATION_FAILED');
+    }
+  });
 });

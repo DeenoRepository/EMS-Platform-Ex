@@ -15,25 +15,26 @@ LDAP подтверждает личность, а PostgreSQL является �
 
 1. Идентифицировать сотрудника по настроенному идентификатору каталога и AD `objectGUID`; UPN хранить как изменяемый атрибут, не как первичный идентификатор.
 2. Первый успешный LDAP-вход создает ожидающую локальную запись без доступа. Заблокированная запись не активируется повторным входом.
-3. Bootstrap является отдельной server-only операцией, одноразовой и атомарной. Конкурирующие bootstrap и last-admin операции должны защищаться транзакцией и утвержденным механизмом блокировки/версии.
-4. Авторизация на сервере выполняет отдельные проверки: активная сессия, permission, module availability для отдела и resource scope. Клиентские поля subject/department/roles не являются доверенными.
-5. Перевод устанавливает ровно один новый отдел и явно выбранные роли, отзывает все сессии и пишет аудит до commit. Старые роли не копируются.
-6. Предлагаемый baseline сессии: absolute TTL 8 часов и idle TTL 30 минут. Background requests не считаются активностью. Значения TTL, cookie flags, token format, rotation, CSRF, rate limits и activity definition являются неутвержденными решениями владельца и блокируют реализацию.
-7. LDAP outage запрещает новый вход; существующая сессия работает в TTL. При недоступной PostgreSQL защищенный доступ запрещается.
-8. Критическое изменение и audit record выполняются в одной транзакции. Успешный вход с созданием сессии также требует audit record. Logout отзывает сессию даже если последующая запись аудита не удалась; точное поведение отказа БД должно быть утверждено.
-9. Audit UI read-only, с фильтрами и cursor pagination, отдельным permission и аудитом просмотра. Экспорт/изменение/удаление не входят в MVP.
+3. Bootstrap является отдельной server-only операцией, одноразовой и атомарной. Оператор и право `platform.bootstrap` подтверждаются внедряемым портом оператора `LocalOperatorPort`, а AD-личность — внедряемым `DirectoryIdentityResolver`. Состояние singleton (`ready`, `completed`, `locked-legacy`) и общий `SELECT ... FOR UPDATE` барьер защищают bootstrap и изменения административного состава.
+4. Авторизация на сервере выполняет отдельные проверки по SHA-256 хэшу credential: активная сессия, permission, module availability для отдела и resource scope. Клиентские контексты и claims игнорируются.
+5. Перевод сотрудника требует `employees.manage`, а назначение/снятие `role.platform.admin` — обладания этой ролью; запрещено снимать роль у последнего активного администратора. Требуется обязательный `expectedVersion`. Перевод атомарно устанавливает отдел, роли, отзывает все сессии сотрудника и пишет аудит до commit.
+6. Управление доступностью модулей требует отдельного права `modules.manage` (не выводится автоматически из `platform.admin`) и обязательного `expectedVersion`.
+7. Утвержденный baseline сессии: absolute TTL 8 часов и idle TTL 30 минут. При входе генерируется случайный 256-битный credential, в БД хранится его SHA-256 хэш. Публичный sessionId отделен от секрета. При upgrade старые сессии отзываются.
+8. LDAP outage запрещает новый вход; существующая сессия работает в TTL. При недоступной PostgreSQL защищенный доступ запрещается.
+9. Критическое изменение и audit record выполняются в одной транзакции. Успешный вход с созданием сессии также требует audit record. Logout отзывает сессию вызывающего credential даже если последующая запись аудита не удалась; отказ БД не дает ложного успеха.
+10. Audit query защищен `audit.view`, использует составной opaque-курсор (timestamp/id с микросекундами) и регистрирует аудит просмотра; отказ записи аудита возвращает `AUDIT_FAILED` без выдачи данных.
 
 ## Предлагаемые фасады и свойства операций
 
 | Фасад | Permission | Scope | Transaction/idempotency |
 | --- | --- | --- | --- |
-| `IdentityFacade.login` | публичный login boundary | только входной UPN; субъект из LDAP | транзакция с session+audit; повторный запрос не должен создать дубликат личности |
-| `IdentityFacade.bootstrap` | `platform.bootstrap` | выбранная AD-личность и отдел | serializable/эквивалентная защита; одноразовый invariant |
-| `AuthorizationFacade.authorize` | вызывается защищенной операцией | ресурсный scope модуля | актуальное чтение PostgreSQL; клиентские claims игнорируются |
-| `AdministrationFacade.assignEmployee` | назначенное admin permission | employee и отдел | атомарно с revoke sessions+audit; optimistic version proposal |
-| `AdministrationFacade.setModuleAvailability` | назначенное admin permission | module+department | атомарно с audit; повтор должен быть безопасен |
-| `AuditFacade.query` | отдельное audit-read permission | разрешенный audit scope | read-only; просмотр аудируется |
-| `SessionFacade.logout` | владелец сессии или разрешенный администратор | конкретная session | revoke не откатывается из-за audit failure |
+| `IdentityFacade.login` | публичный login boundary | входной UPN, субъект из AD | транзакция с session+audit; возвращает sessionContext и 256-битный credential; повторный запрос не создает дубликат |
+| `IdentityFacade.bootstrap` | `platform.bootstrap` через `LocalOperatorPort` | подтвержденная AD-личность и отдел | singleton lock `SELECT ... FOR UPDATE`; состояния ready->completed; одноразовый invariant |
+| `AuthorizationFacade.authorize` | вызывается защищенной операцией | ресурсный scope модуля | актуальное чтение PostgreSQL по credential_hash; клиентские claims игнорируются |
+| `AdministrationFacade.assignEmployee` | `employees.manage` (+ `role.platform.admin` для админ-ролей) | employee и отдел | singleton lock, проверка last active admin, обязательный expectedVersion, атомарно с revoke sessions+audit |
+| `AdministrationFacade.setModuleAvailability` | отдельное `modules.manage` | module+department | обязательный expectedVersion (CAS), атомарно с audit |
+| `AuditFacade.query` | отдельное `audit.view` | разрешенный audit scope | read-only, пагинация по составному opaque-курсору, обязательный аудит просмотра (при отказе — `AUDIT_FAILED`) |
+| `SessionFacade.logout` | владелец сессии (actorCredential) | собственная сессия | отзыв сессии по credential_hash; revoke не откатывается из-за audit failure |
 
 Ошибки должны использовать стабильные обобщенные коды. `NOT_FOUND_OR_FORBIDDEN` предлагается для предотвращения раскрытия существования чужого ресурса. Все входы и ответы получают runtime validation. Для каждой операции до реализации должны быть определены входное состояние, атомарная граница, результат конфликта/сбоя и обязательная audit-запись.
 

@@ -34,10 +34,27 @@ export class ExtensionRegistry {
         retryable: false,
       });
     }
+
+    if (runner !== undefined && typeof runner !== 'function') {
+      return fail({
+        code: 'VALIDATION_FAILED',
+        message: 'Диагностический runner должен быть функцией',
+        retryable: false,
+      });
+    }
+
     if (!manifest.id || manifest.id.trim().length === 0) {
       return fail({
         code: 'VALIDATION_FAILED',
         message: 'Идентификатор модуля не может быть пустым',
+        retryable: false,
+      });
+    }
+
+    if (!manifest.displayName || manifest.displayName.trim().length === 0) {
+      return fail({
+        code: 'VALIDATION_FAILED',
+        message: 'Отображаемое имя модуля не может быть пустым',
         retryable: false,
       });
     }
@@ -69,6 +86,20 @@ export class ExtensionRegistry {
         return fail({
           code: 'VALIDATION_FAILED',
           message: `Модуль '${manifest.id}' содержит объявление разрешения с пустым идентификатором`,
+          retryable: false,
+        });
+      }
+      if (!perm.displayName || perm.displayName.trim().length === 0) {
+        return fail({
+          code: 'VALIDATION_FAILED',
+          message: `Разрешение '${perm.id}' содержит пустое отображаемое имя`,
+          retryable: false,
+        });
+      }
+      if (perm.description !== undefined && typeof perm.description !== 'string') {
+        return fail({
+          code: 'VALIDATION_FAILED',
+          message: `Разрешение '${perm.id}' содержит некорректное описание`,
           retryable: false,
         });
       }
@@ -122,6 +153,16 @@ export class ExtensionRegistry {
           retryable: false,
         });
       }
+      if (
+        contrib.requiredPermission !== undefined &&
+        (typeof contrib.requiredPermission !== 'string' || contrib.requiredPermission.trim().length === 0)
+      ) {
+        return fail({
+          code: 'VALIDATION_FAILED',
+          message: `UI-вклад '${contrib.id}' содержит пустое требуемое разрешение`,
+          retryable: false,
+        });
+      }
       if (localContributions.has(contrib.id)) {
         return fail({
           code: 'CONFLICT',
@@ -160,6 +201,13 @@ export class ExtensionRegistry {
             retryable: false,
           });
         }
+        if (!diag.displayName || diag.displayName.trim().length === 0) {
+          return fail({
+            code: 'VALIDATION_FAILED',
+            message: `Диагностика '${diag.id}' содержит пустое отображаемое имя`,
+            retryable: false,
+          });
+        }
         if (localDiagnostics.has(diag.id)) {
           return fail({
             code: 'CONFLICT',
@@ -171,22 +219,60 @@ export class ExtensionRegistry {
       }
     }
 
-    // Применяем регистрацию после успешной валидации
-    for (const permId of localPerms) {
-      this.permissionOwners.set(permId, manifest.id);
-    }
-    for (const contribId of localContributions) {
-      this.contributionOwners.set(contribId, manifest.id);
+    // Создаем защитную изолированную копию манифеста от последующих мутаций (план 5.5)
+    const clonedManifest: ModuleManifest = {
+      id: manifest.id,
+      kind: manifest.kind,
+      contractVersion: manifest.contractVersion,
+      displayName: manifest.displayName,
+      permissions: manifest.permissions.map((p) => ({
+        id: p.id,
+        displayName: p.displayName,
+        ...(p.description !== undefined ? { description: p.description } : {}),
+      })),
+      uiContributions: manifest.uiContributions.map((u) => ({
+        id: u.id,
+        targetSlot: u.targetSlot,
+        label: u.label,
+        path: u.path,
+        ...(u.requiredPermission !== undefined ? { requiredPermission: u.requiredPermission } : {}),
+      })),
+      ...(manifest.diagnostics
+        ? {
+            diagnostics: manifest.diagnostics.map((d) => ({
+              id: d.id,
+              displayName: d.displayName,
+            })),
+          }
+        : {}),
+    };
+
+    Object.freeze(clonedManifest);
+    Object.freeze(clonedManifest.permissions);
+    clonedManifest.permissions.forEach(Object.freeze);
+    Object.freeze(clonedManifest.uiContributions);
+    clonedManifest.uiContributions.forEach(Object.freeze);
+    if (clonedManifest.diagnostics) {
+      Object.freeze(clonedManifest.diagnostics);
+      clonedManifest.diagnostics.forEach(Object.freeze);
     }
 
-    if (runner && manifest.diagnostics) {
-      for (const diag of manifest.diagnostics) {
-        this.diagnosticRunners.set(`${manifest.id}:${diag.id}`, runner);
+    // Применяем регистрацию ТОЛЬКО после того, как все проверки успешно пройдены
+    for (const permId of localPerms) {
+      this.permissionOwners.set(permId, clonedManifest.id);
+    }
+    for (const contribId of localContributions) {
+      this.contributionOwners.set(contribId, clonedManifest.id);
+    }
+
+    if (runner && clonedManifest.diagnostics) {
+      for (const diag of clonedManifest.diagnostics) {
+        this.diagnosticRunners.set(`${clonedManifest.id}:${diag.id}`, runner);
       }
     }
 
-    this.modules.set(manifest.id, {
-      manifest,
+    this.modules.set(clonedManifest.id, {
+      manifest: clonedManifest,
       registeredAt: new Date(),
     });
 
@@ -258,18 +344,73 @@ export class ExtensionRegistry {
 
   private isManifestShapeValid(manifest: ModuleManifest): boolean {
     if (!manifest || typeof manifest !== 'object') return false;
-    if (typeof manifest.id !== 'string' || typeof manifest.kind !== 'string' || typeof manifest.contractVersion !== 'string' || typeof manifest.displayName !== 'string') return false;
-    if (!Array.isArray(manifest.permissions) || !Array.isArray(manifest.uiContributions)) return false;
-    if (manifest.kind !== 'business-module' && manifest.kind !== 'core-extension') return false;
-    if (manifest.diagnostics !== undefined && !Array.isArray(manifest.diagnostics)) return false;
-    if (manifest.permissions.some((permission) => !permission || typeof permission.id !== 'string' || typeof permission.displayName !== 'string')) return false;
-    if (manifest.uiContributions.some((contribution) => !contribution || typeof contribution.id !== 'string' || typeof contribution.targetSlot !== 'string' || typeof contribution.label !== 'string' || typeof contribution.path !== 'string' || (contribution.requiredPermission !== undefined && typeof contribution.requiredPermission !== 'string'))) return false;
-    return !manifest.diagnostics?.some((diagnostic) => !diagnostic || typeof diagnostic.id !== 'string' || typeof diagnostic.displayName !== 'string');
+    if (
+      typeof manifest.id !== 'string' ||
+      typeof manifest.kind !== 'string' ||
+      typeof manifest.contractVersion !== 'string' ||
+      typeof manifest.displayName !== 'string'
+    ) {
+      return false;
+    }
+    if (!Array.isArray(manifest.permissions) || !Array.isArray(manifest.uiContributions)) {
+      return false;
+    }
+    if (manifest.kind !== 'business-module' && manifest.kind !== 'core-extension') {
+      return false;
+    }
+    if (manifest.diagnostics !== undefined && !Array.isArray(manifest.diagnostics)) {
+      return false;
+    }
+    if (
+      manifest.permissions.some(
+        (permission) =>
+          !permission ||
+          typeof permission !== 'object' ||
+          typeof permission.id !== 'string' ||
+          typeof permission.displayName !== 'string',
+      )
+    ) {
+      return false;
+    }
+    if (
+      manifest.uiContributions.some(
+        (contribution) =>
+          !contribution ||
+          typeof contribution !== 'object' ||
+          typeof contribution.id !== 'string' ||
+          typeof contribution.targetSlot !== 'string' ||
+          typeof contribution.label !== 'string' ||
+          typeof contribution.path !== 'string' ||
+          (contribution.requiredPermission !== undefined &&
+            typeof contribution.requiredPermission !== 'string'),
+      )
+    ) {
+      return false;
+    }
+    if (
+      manifest.diagnostics?.some(
+        (diagnostic) =>
+          !diagnostic ||
+          typeof diagnostic !== 'object' ||
+          typeof diagnostic.id !== 'string' ||
+          typeof diagnostic.displayName !== 'string',
+      )
+    ) {
+      return false;
+    }
+    return true;
   }
 
-  private isDiagnosticResult(value: DiagnosticResult): value is DiagnosticResult {
-    return Boolean(value) && typeof value === 'object' &&
-      (value.status === 'ok' || value.status === 'error' || value.status === 'timeout') &&
-      typeof value.detailCode === 'string' && Number.isFinite(value.durationMs) && value.durationMs >= 0;
+  private isDiagnosticResult(value: unknown): value is DiagnosticResult {
+    return (
+      Boolean(value) &&
+      typeof value === 'object' &&
+      ((value as DiagnosticResult).status === 'ok' ||
+        (value as DiagnosticResult).status === 'error' ||
+        (value as DiagnosticResult).status === 'timeout') &&
+      typeof (value as DiagnosticResult).detailCode === 'string' &&
+      Number.isFinite((value as DiagnosticResult).durationMs) &&
+      (value as DiagnosticResult).durationMs >= 0
+    );
   }
 }

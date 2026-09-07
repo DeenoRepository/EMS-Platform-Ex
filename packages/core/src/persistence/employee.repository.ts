@@ -52,6 +52,58 @@ export class EmployeeRepository {
     return res.rows[0] ?? null;
   }
 
+  async getOrCreateByDirectoryGuid(
+    q: Queryable,
+    data: {
+      readonly directoryId: string;
+      readonly objectGuid: string;
+      readonly upn: string;
+      readonly displayName: string;
+      readonly status: 'PENDING' | 'ACTIVE' | 'BLOCKED';
+      readonly departmentId?: string;
+    },
+  ): Promise<EmployeeRow> {
+    let row = await this.findByDirectoryGuid(q, data.directoryId, data.objectGuid);
+    if (row) {
+      if (row.upn !== data.upn || row.display_name !== data.displayName) {
+        const updateRes = await q.query<EmployeeRow>(
+          `UPDATE ems_core.employees
+           SET upn = $1, display_name = $2, updated_at = NOW()
+           WHERE id = $3
+           RETURNING id, directory_id, object_guid, upn, display_name, status, department_id, version, created_at::text, updated_at::text`,
+          [data.upn, data.displayName, row.id],
+        );
+        if (updateRes.rows.length > 0) {
+          row = updateRes.rows[0]!;
+        }
+      }
+      return row;
+    }
+
+    const newId = crypto.randomUUID();
+    await q.query(
+      `INSERT INTO ems_core.employees (
+        id, directory_id, object_guid, upn, display_name, status, department_id
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+      ON CONFLICT (directory_id, object_guid) DO NOTHING`,
+      [
+        newId,
+        data.directoryId,
+        data.objectGuid,
+        data.upn,
+        data.displayName,
+        data.status,
+        data.departmentId ?? null,
+      ],
+    );
+
+    row = await this.findByDirectoryGuid(q, data.directoryId, data.objectGuid);
+    if (!row) {
+      throw new Error('Failed to get or create employee identity');
+    }
+    return row;
+  }
+
   async create(
     q: Queryable,
     employee: NewEmployee,

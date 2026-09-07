@@ -3,6 +3,7 @@ import type { Queryable } from './db.js';
 export interface AuditRecordRow {
   readonly id: string;
   readonly timestamp: string;
+  readonly timestamp_iso: string;
   readonly subject_id: string;
   readonly action: string;
   readonly object_type: string;
@@ -10,6 +11,7 @@ export interface AuditRecordRow {
   readonly result: 'SUCCESS' | 'FAILURE';
   readonly correlation_id: string | null;
   readonly details: Record<string, unknown> | null;
+  readonly format_version: number;
 }
 
 export interface NewAuditRecord {
@@ -22,6 +24,7 @@ export interface NewAuditRecord {
   readonly result: 'SUCCESS' | 'FAILURE';
   readonly correlationId?: string;
   readonly details?: Record<string, unknown>;
+  readonly formatVersion?: number;
 }
 
 export interface AuditQueryFilter {
@@ -29,7 +32,7 @@ export interface AuditQueryFilter {
   readonly periodEnd?: string;
   readonly action?: string;
   readonly subjectId?: string;
-  readonly cursor?: string; // base64url(JSON({ timestamp, id }))
+  readonly cursor?: string;
   readonly limit?: number;
 }
 
@@ -37,8 +40,8 @@ export class AuditRepository {
   async insert(q: Queryable, record: NewAuditRecord): Promise<void> {
     const text = `
       INSERT INTO ems_core.audit_log (
-        id, timestamp, subject_id, action, object_type, object_id, result, correlation_id, details
-      ) VALUES ($1, COALESCE($2, NOW()), $3, $4, $5, $6, $7, $8, $9)
+        id, timestamp, subject_id, action, object_type, object_id, result, correlation_id, details, format_version
+      ) VALUES ($1, COALESCE($2, NOW()), $3, $4, $5, $6, $7, $8, $9, $10)
     `;
     const values = [
       record.id,
@@ -50,6 +53,7 @@ export class AuditRepository {
       record.result,
       record.correlationId ?? null,
       record.details ? JSON.stringify(record.details) : null,
+      record.formatVersion ?? 2,
     ];
     await q.query(text, values);
   }
@@ -63,37 +67,46 @@ export class AuditRepository {
     let paramIndex = 1;
 
     if (filter.periodStart) {
-      conditions.push(`timestamp >= $${paramIndex++}`);
+      conditions.push(`ems_core.audit_log.timestamp >= $${paramIndex++}::timestamptz`);
       values.push(filter.periodStart);
     }
     if (filter.periodEnd) {
-      conditions.push(`timestamp <= $${paramIndex++}`);
+      conditions.push(`ems_core.audit_log.timestamp <= $${paramIndex++}::timestamptz`);
       values.push(filter.periodEnd);
     }
     if (filter.action) {
-      conditions.push(`action = $${paramIndex++}`);
+      conditions.push(`ems_core.audit_log.action = $${paramIndex++}`);
       values.push(filter.action);
     }
     if (filter.subjectId) {
-      conditions.push(`subject_id = $${paramIndex++}`);
+      conditions.push(`ems_core.audit_log.subject_id = $${paramIndex++}`);
       values.push(filter.subjectId);
     }
     if (filter.cursor) {
-      let cursor: { timestamp: string; id: string };
+      let parsed: any;
       try {
         const decoded = Buffer.from(filter.cursor, 'base64url').toString('utf8');
-        const parsed: unknown = JSON.parse(decoded);
-        if (
-          typeof parsed !== 'object' || parsed === null ||
-          typeof (parsed as { timestamp?: unknown }).timestamp !== 'string' ||
-          typeof (parsed as { id?: unknown }).id !== 'string'
-        ) throw new Error('invalid cursor');
-        cursor = parsed as { timestamp: string; id: string };
+        parsed = JSON.parse(decoded);
       } catch {
-        throw new Error('Invalid audit cursor');
+        throw new Error('INVALID_CURSOR');
       }
-      conditions.push(`(timestamp, id) < ($${paramIndex++}, $${paramIndex++})`);
-      values.push(cursor.timestamp, cursor.id);
+
+      if (
+        !parsed ||
+        typeof parsed !== 'object' ||
+        parsed.v !== 2 ||
+        typeof parsed.t !== 'string' ||
+        typeof parsed.id !== 'string' ||
+        isNaN(Date.parse(parsed.t)) ||
+        parsed.id.trim() === ''
+      ) {
+        throw new Error('INVALID_CURSOR');
+      }
+
+      conditions.push(
+        `(ems_core.audit_log.timestamp, ems_core.audit_log.id) < ($${paramIndex++}::timestamptz, $${paramIndex++})`,
+      );
+      values.push(parsed.t, parsed.id);
     }
 
     const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -101,10 +114,21 @@ export class AuditRepository {
     values.push(limit + 1);
 
     const sql = `
-      SELECT id, timestamp::text, subject_id, action, object_type, object_id, result, correlation_id, details
+      SELECT
+        id,
+        timestamp::text as timestamp,
+        to_char(timestamp AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') as timestamp_iso,
+        subject_id,
+        action,
+        object_type,
+        object_id,
+        result,
+        correlation_id,
+        details,
+        format_version
       FROM ems_core.audit_log
       ${whereClause}
-      ORDER BY timestamp DESC, id DESC
+      ORDER BY ems_core.audit_log.timestamp DESC, ems_core.audit_log.id DESC
       LIMIT $${paramIndex}
     `;
 
@@ -112,9 +136,13 @@ export class AuditRepository {
     const hasMore = res.rows.length > limit;
     const items = hasMore ? res.rows.slice(0, limit) : res.rows;
     const last = items[items.length - 1];
-    const nextCursor = hasMore && last
-      ? Buffer.from(JSON.stringify({ timestamp: last.timestamp, id: last.id }), 'utf8').toString('base64url')
-      : undefined;
+    const nextCursor =
+      hasMore && last
+        ? Buffer.from(
+            JSON.stringify({ v: 2, t: last.timestamp_iso, id: last.id }),
+            'utf8',
+          ).toString('base64url')
+        : undefined;
 
     return { items, nextCursor };
   }

@@ -18,7 +18,8 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/registry.test.js dist/facades/facades.test.js"
+    "test": "tsc && node --test dist/registry.test.js dist/facades/facades.test.js dist/persistence/migrator.test.js dist/persistence/pg-integration.test.js",
+    "test:pg": "tsc && node --test dist/persistence/pg-integration.test.js"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1"

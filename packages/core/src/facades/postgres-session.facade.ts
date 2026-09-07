@@ -8,35 +8,40 @@ import { ok, fail } from '@ems/contracts';
 import type { DatabasePool } from '../persistence/db.js';
 import { SessionRepository } from '../persistence/session.repository.js';
 import { AuditRepository } from '../persistence/audit.repository.js';
-import { EmployeeRepository } from '../persistence/employee.repository.js';
+import { hashCredential, isValidCredentialFormat } from './subject-auth.js';
 
 export class PostgresSessionFacade implements SessionFacade {
   private readonly sessionRepo = new SessionRepository();
   private readonly auditRepo = new AuditRepository();
-  private readonly employeeRepo = new EmployeeRepository();
 
   constructor(private readonly pool: DatabasePool) {}
 
   async logout(input: LogoutInput): Promise<Result<void>> {
-    if (!input.sessionId) {
+    if (!input || !input.actorCredential || !isValidCredentialFormat(input.actorCredential.value)) {
       return fail({
-        code: 'VALIDATION_FAILED',
-        message: 'Идентификатор сессии обязателен для завершения',
+        code: 'UNAUTHENTICATED',
+        message: 'Недействительные учетные данные сессии для завершения',
         retryable: false,
       });
     }
 
-    // Отзываем сессию в БД
-    const actorSession = await this.sessionRepo.findActiveById(this.pool, input.actorCredential.value);
-    if (!actorSession || actorSession.id !== input.sessionId) {
-      return fail({ code: 'NOT_FOUND_OR_FORBIDDEN', message: 'Сессия не найдена или не принадлежит оператору', retryable: false });
-    }
-    const actor = await this.employeeRepo.findById(this.pool, actorSession.employee_id);
-    const revoked = await this.sessionRepo.revoke(this.pool, input.sessionId, 'USER_LOGOUT');
-    if (!revoked) {
+    const hash = hashCredential(input.actorCredential.value);
+
+    let revokedSession: import('../persistence/session.repository.js').SessionRow | null = null;
+    try {
+      revokedSession = await this.sessionRepo.revokeByCredentialHash(this.pool, hash, 'USER_LOGOUT');
+    } catch {
       return fail({
-        code: 'NOT_FOUND_OR_FORBIDDEN',
-        message: 'Активная сессия не найдена',
+        code: 'DEPENDENCY_UNAVAILABLE',
+        message: 'Ошибка базы данных при завершении сессии',
+        retryable: true,
+      });
+    }
+
+    if (!revokedSession) {
+      return fail({
+        code: 'UNAUTHENTICATED',
+        message: 'Сессия не найдена, истекла или уже отозвана',
         retryable: false,
       });
     }
@@ -45,14 +50,14 @@ export class PostgresSessionFacade implements SessionFacade {
     try {
       await this.auditRepo.insert(this.pool, {
         id: crypto.randomUUID(),
-        subjectId: actor?.id ?? actorSession.employee_id,
+        subjectId: revokedSession.employee_id,
         action: 'LOGOUT',
         objectType: 'session',
-        objectId: input.sessionId,
+        objectId: revokedSession.id, // безопасный публичный ID сессии, никогда credential или hash
         result: 'SUCCESS',
       });
     } catch {
-      // Игнорируем ошибку аудита при выходе согласно FR-028
+      // Игнорируем ошибку аудита при выходе согласно FR-028 (revoke уже зафиксирован в БД)
     }
 
     return ok(undefined);

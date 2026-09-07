@@ -16,6 +16,30 @@ export interface SessionCredential {
   readonly value: string;
 }
 
+export interface LocalOperatorIdentity {
+  readonly operatorId: string;
+  readonly permissions: readonly string[];
+}
+
+export interface LocalOperatorPort {
+  resolveOperator(): Promise<Result<LocalOperatorIdentity>>;
+}
+
+export interface DirectoryIdentity {
+  readonly directoryId: string;
+  readonly objectGuid: string;
+  readonly upn: string;
+  readonly displayName: string;
+}
+
+export interface DirectoryIdentityResolver {
+  resolveByUpn(upn: string): Promise<Result<DirectoryIdentity>>;
+}
+
+export interface DirectoryAuthenticator {
+  authenticate(upn: string, password: string): Promise<Result<DirectoryIdentity>>;
+}
+
 export interface LoginInput {
   readonly upn: string;
   readonly password: string;
@@ -23,10 +47,10 @@ export interface LoginInput {
 
 export interface LoginOutput {
   readonly session: SessionContext;
+  readonly credential: SessionCredential;
 }
 
 export interface BootstrapInput {
-  readonly operatorId: string;
   readonly upn: string;
   readonly initialDepartmentId: string;
 }
@@ -39,7 +63,6 @@ export interface BootstrapOutput {
 
 export interface AuthorizeInput {
   readonly credential: SessionCredential;
-  readonly sessionContext: SessionContext;
   readonly permission: string;
   readonly resourceScope?: string;
   readonly moduleId?: string;
@@ -55,7 +78,7 @@ export interface AssignEmployeeInput {
   readonly employeeId: string;
   readonly departmentId: string;
   readonly roleIds: readonly string[];
-  readonly expectedVersion?: number;
+  readonly expectedVersion: number;
 }
 
 export interface AssignEmployeeOutput {
@@ -70,13 +93,14 @@ export interface SetModuleAvailabilityInput {
   readonly moduleId: string;
   readonly departmentId: string;
   readonly enabled: boolean;
-  readonly expectedVersion?: number;
+  readonly expectedVersion: number;
 }
 
 export interface SetModuleAvailabilityOutput {
   readonly moduleId: string;
   readonly departmentId: string;
   readonly enabled: boolean;
+  readonly version: number;
 }
 
 export interface AuditQueryInput {
@@ -108,7 +132,6 @@ export interface AuditQueryOutput {
 
 export interface LogoutInput {
   readonly actorCredential: SessionCredential;
-  readonly sessionId: string;
 }
 
 export interface IdentityFacade {
