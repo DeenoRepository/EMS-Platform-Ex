@@ -6,6 +6,7 @@ import type {
 import { ok, fail } from '@ems/contracts';
 
 export const SUPPORTED_CONTRACT_VERSIONS = ['1.0.0'] as const;
+export const ALLOWED_UI_SLOTS = ['sidebar', 'dashboard', 'settings'] as const;
 
 export interface RegisteredModule {
   readonly manifest: ModuleManifest;
@@ -19,6 +20,7 @@ export interface DiagnosticRunner {
 export class ExtensionRegistry {
   private readonly modules = new Map<string, RegisteredModule>();
   private readonly permissionOwners = new Map<string, string>();
+  private readonly contributionOwners = new Map<string, string>();
   private readonly diagnosticRunners = new Map<string, DiagnosticRunner>();
 
   register(
@@ -53,7 +55,25 @@ export class ExtensionRegistry {
       });
     }
 
+    // Валидация разрешений
+    const localPerms = new Set<string>();
     for (const perm of manifest.permissions) {
+      if (!perm.id || perm.id.trim().length === 0) {
+        return fail({
+          code: 'VALIDATION_FAILED',
+          message: `Модуль '${manifest.id}' содержит объявление разрешения с пустым идентификатором`,
+          retryable: false,
+        });
+      }
+      if (localPerms.has(perm.id)) {
+        return fail({
+          code: 'CONFLICT',
+          message: `Дублирующееся разрешение '${perm.id}' внутри манифеста модуля '${manifest.id}'`,
+          retryable: false,
+        });
+      }
+      localPerms.add(perm.id);
+
       const existingOwner = this.permissionOwners.get(perm.id);
       if (existingOwner) {
         return fail({
@@ -64,8 +84,92 @@ export class ExtensionRegistry {
       }
     }
 
-    for (const perm of manifest.permissions) {
-      this.permissionOwners.set(perm.id, manifest.id);
+    // Валидация UI-вкладов (FR-033, ADR-0001)
+    const localContributions = new Set<string>();
+    for (const contrib of manifest.uiContributions) {
+      if (!contrib.id || contrib.id.trim().length === 0) {
+        return fail({
+          code: 'VALIDATION_FAILED',
+          message: `Модуль '${manifest.id}' содержит UI-вклад с пустым идентификатором`,
+          retryable: false,
+        });
+      }
+      if (!contrib.label || contrib.label.trim().length === 0) {
+        return fail({
+          code: 'VALIDATION_FAILED',
+          message: `UI-вклад '${contrib.id}' модуля '${manifest.id}' содержит пустой label`,
+          retryable: false,
+        });
+      }
+      if (!contrib.path || contrib.path.trim().length === 0) {
+        return fail({
+          code: 'VALIDATION_FAILED',
+          message: `UI-вклад '${contrib.id}' модуля '${manifest.id}' содержит пустой path`,
+          retryable: false,
+        });
+      }
+      if (!ALLOWED_UI_SLOTS.includes(contrib.targetSlot as (typeof ALLOWED_UI_SLOTS)[number])) {
+        return fail({
+          code: 'VALIDATION_FAILED',
+          message: `Недопустимый targetSlot '${contrib.targetSlot}' для UI-вклада '${contrib.id}'`,
+          retryable: false,
+        });
+      }
+      if (localContributions.has(contrib.id)) {
+        return fail({
+          code: 'CONFLICT',
+          message: `Дублирующийся UI-вклад '${contrib.id}' внутри манифеста модуля '${manifest.id}'`,
+          retryable: false,
+        });
+      }
+      localContributions.add(contrib.id);
+
+      const existingOwner = this.contributionOwners.get(contrib.id);
+      if (existingOwner) {
+        return fail({
+          code: 'CONFLICT',
+          message: `UI-вклад '${contrib.id}' уже объявлен модулем '${existingOwner}'`,
+          retryable: false,
+        });
+      }
+    }
+
+    // Валидация диагностик: запрет отсутствующего раннера (FR-033)
+    if (manifest.diagnostics && manifest.diagnostics.length > 0) {
+      if (!runner) {
+        return fail({
+          code: 'VALIDATION_FAILED',
+          message: `Модуль '${manifest.id}' объявляет диагностические проверки, но runner не предоставлен`,
+          retryable: false,
+        });
+      }
+
+      const localDiagnostics = new Set<string>();
+      for (const diag of manifest.diagnostics) {
+        if (!diag.id || diag.id.trim().length === 0) {
+          return fail({
+            code: 'VALIDATION_FAILED',
+            message: `Модуль '${manifest.id}' содержит диагностику с пустым идентификатором`,
+            retryable: false,
+          });
+        }
+        if (localDiagnostics.has(diag.id)) {
+          return fail({
+            code: 'CONFLICT',
+            message: `Дублирующаяся диагностика '${diag.id}' внутри манифеста модуля '${manifest.id}'`,
+            retryable: false,
+          });
+        }
+        localDiagnostics.add(diag.id);
+      }
+    }
+
+    // Применяем регистрацию после успешной валидации
+    for (const permId of localPerms) {
+      this.permissionOwners.set(permId, manifest.id);
+    }
+    for (const contribId of localContributions) {
+      this.contributionOwners.set(contribId, manifest.id);
     }
 
     if (runner && manifest.diagnostics) {
@@ -110,9 +214,10 @@ export class ExtensionRegistry {
     }
 
     const start = Date.now();
+    let timerId: ReturnType<typeof setTimeout> | undefined;
     try {
       const timeoutPromise = new Promise<DiagnosticResult>((resolve) => {
-        setTimeout(() => {
+        timerId = setTimeout(() => {
           resolve({
             status: 'timeout',
             detailCode: 'DIAGNOSTIC_TIMEOUT',
@@ -129,6 +234,10 @@ export class ExtensionRegistry {
         detailCode: 'DIAGNOSTIC_EXECUTION_FAILED',
         durationMs: Date.now() - start,
       };
+    } finally {
+      if (timerId !== undefined) {
+        clearTimeout(timerId);
+      }
     }
   }
 }

@@ -135,4 +135,91 @@ describe('ExtensionRegistry contract tests', () => {
     assert.equal(res.status, 'error');
     assert.equal(res.detailCode, 'DIAGNOSTIC_NOT_FOUND');
   });
+
+  test('отклонение дублирующегося разрешения внутри одного манифеста', () => {
+    const registry = new ExtensionRegistry();
+    const duplicatePermManifest: ModuleManifest = {
+      ...validManifest,
+      id: 'test.module.duplicate-perm',
+      permissions: [
+        { id: 'perm.one', displayName: 'Первое' },
+        { id: 'perm.one', displayName: 'Дубликат' },
+      ],
+    };
+
+    const result = registry.register(duplicatePermManifest);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error.code, 'CONFLICT');
+      assert.match(result.error.message, /внутри манифеста/);
+    }
+  });
+
+  test('отклонение манифеста с диагностиками при отсутствии runner (FR-033)', () => {
+    const registry = new ExtensionRegistry();
+    const manifestWithDiagNoRunner: ModuleManifest = {
+      ...validManifest,
+      id: 'test.module.diag-no-runner',
+      diagnostics: [
+        { id: 'check-something', displayName: 'Проверка' },
+      ],
+    };
+
+    const result = registry.register(manifestWithDiagNoRunner);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error.code, 'VALIDATION_FAILED');
+      assert.match(result.error.message, /runner не предоставлен/);
+    }
+  });
+
+  test('отклонение невалидного targetSlot для UI-вклада', () => {
+    const registry = new ExtensionRegistry();
+    const badSlotManifest: ModuleManifest = {
+      ...validManifest,
+      id: 'test.module.bad-slot',
+      uiContributions: [
+        {
+          id: 'bad-contrib',
+          targetSlot: 'unsupported-slot' as any,
+          label: 'Метка',
+          path: '/path',
+        },
+      ],
+    };
+
+    const result = registry.register(badSlotManifest);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error.code, 'VALIDATION_FAILED');
+      assert.match(result.error.message, /Недопустимый targetSlot/);
+    }
+  });
+
+  test('отклонение дублирующегося UI-вклада между модулями', () => {
+    const registry = new ExtensionRegistry();
+    const first = registry.register(validManifest);
+    assert.equal(first.ok, true);
+
+    const conflictingManifest: ModuleManifest = {
+      ...validManifest,
+      id: 'test.module.conflicting-ui',
+      permissions: [],
+      uiContributions: [
+        {
+          id: 'nav.orders', // дублирует validManifest
+          targetSlot: 'sidebar',
+          label: 'Заказы 2',
+          path: '/orders2',
+        },
+      ],
+    };
+
+    const result = registry.register(conflictingManifest);
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.error.code, 'CONFLICT');
+      assert.match(result.error.message, /UI-вклад 'nav\.orders' уже объявлен/);
+    }
+  });
 });
