@@ -123,7 +123,7 @@ describe('PostgreSQL facade concurrency acceptance', () => {
           roleIds: [],
           expectedVersion: 1,
         });
-        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
+        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid), 10000, 2);
         await release();
         return Promise.all([loginPromise, assignPromise]);
       },
@@ -163,7 +163,7 @@ describe('PostgreSQL facade concurrency acceptance', () => {
         });
         await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
         const loginPromise = login(targetUpn);
-        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
+        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid), 10000, 2);
         await release();
         return Promise.all([assignPromise, loginPromise]);
       },
@@ -272,23 +272,23 @@ describe('PostgreSQL facade concurrency acceptance', () => {
       'SELECT id FROM ems_core.bootstrap_state WHERE id = 1 FOR UPDATE',
       [],
       async (release, blockerPid) => {
-        const operations = Promise.all([
-          administration.assignEmployee({
-            actorCredential: sessionA.credential,
-            employeeId: sessionB.session.employeeId,
-            departmentId: 'dept-mutual-a',
-            roleIds: [],
-            expectedVersion: rowB!.version,
-          }),
-          administration.assignEmployee({
-            actorCredential: sessionB.credential,
-            employeeId: sessionA.session.employeeId,
-            departmentId: 'dept-mutual-a',
-            roleIds: [],
-            expectedVersion: rowA!.version,
-          }),
-        ]);
+        const first = administration.assignEmployee({
+          actorCredential: sessionA.credential,
+          employeeId: sessionB.session.employeeId,
+          departmentId: 'dept-mutual-a',
+          roleIds: [],
+          expectedVersion: rowB!.version,
+        });
         await waitUntilBlocked(runtimePool, blockedByPredicate(blockerPid));
+        const second = administration.assignEmployee({
+          actorCredential: sessionB.credential,
+          employeeId: sessionA.session.employeeId,
+          departmentId: 'dept-mutual-a',
+          roleIds: [],
+          expectedVersion: rowA!.version,
+        });
+        const operations = Promise.all([first, second]);
+        await waitUntilBlocked(runtimePool, blockedByPredicate(blockerPid), 10000, 2);
         await release();
         return operations;
       },

@@ -319,6 +319,54 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
     }
   });
 
+  test('PostgreSQL lock_timeout и statement_timeout возвращают SQLSTATE и освобождают ресурсы', async () => {
+    const migrationPool = new DatabasePool({ connectionString: migrationUrl });
+    const runtimePool = new DatabasePool({ connectionString: runtimeUrl });
+    const migrator = new SchemaMigrator(migrationPool);
+    const blocker = await runtimePool.rawPool.connect();
+    const waiter = await runtimePool.rawPool.connect();
+    try {
+      await migrator.teardownEphemeralSchema();
+      await migrator.provisionClean(loadMigrations());
+      await runtimePool.query(
+        `INSERT INTO ems_core.employees
+         (id, directory_id, object_guid, upn, display_name, status)
+         VALUES ('timeout-employee', 'corp.local', 'timeout-guid', 'timeout@corp.local', 'Timeout', 'PENDING')`,
+      );
+      await blocker.query('BEGIN');
+      await blocker.query("SELECT id FROM ems_core.employees WHERE id = 'timeout-employee' FOR UPDATE");
+
+      await waiter.query('SET lock_timeout = 100');
+      let lockError: { code?: string } | undefined;
+      await waiter.query("UPDATE ems_core.employees SET display_name = 'Blocked' WHERE id = 'timeout-employee'").catch((error: { code?: string }) => {
+        lockError = error;
+      });
+      assert.equal(lockError?.code, '55P03');
+      await blocker.query('COMMIT');
+
+      const released = await waiter.query<{ display_name: string }>(
+        "UPDATE ems_core.employees SET display_name = 'Released' WHERE id = 'timeout-employee' RETURNING display_name",
+      );
+      assert.equal(released.rows[0]?.display_name, 'Released');
+
+      await waiter.query('SET statement_timeout = 100');
+      let statementError: { code?: string } | undefined;
+      await waiter.query('SELECT pg_sleep(1)').catch((error: { code?: string }) => {
+        statementError = error;
+      });
+      assert.equal(statementError?.code, '57014');
+      const reusable = await waiter.query<{ value: number }>('SELECT 1 AS value');
+      assert.equal(reusable.rows[0]?.value, 1);
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+      waiter.release();
+      await migrator.teardownEphemeralSchema().catch(() => undefined);
+      await runtimePool.close();
+      await migrationPool.close();
+    }
+  });
+
   test('Реальная конкурентность двух соединений PostgreSQL (two logins on same identity)', async () => {
     const pool1 = new DatabasePool({ connectionString: runtimeUrl });
     const pool2 = new DatabasePool({ connectionString: runtimeUrl });

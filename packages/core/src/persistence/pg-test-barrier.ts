@@ -8,6 +8,7 @@ export async function waitUntilBlocked(
   pool: DatabasePool,
   predicateSql: string,
   timeoutMs = 10000,
+  minimumCount = 1,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastCount = 0;
@@ -15,7 +16,7 @@ export async function waitUntilBlocked(
   while (Date.now() < deadline) {
     const result = await pool.query<{ count: string }>(predicateSql);
     lastCount = Number(result.rows[0]?.count ?? 0);
-    if (lastCount > 0) return;
+    if (lastCount >= minimumCount) return;
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 
@@ -55,13 +56,23 @@ export async function withDecoyLock<T>(
 export function blockedRowPredicate(relation: string, blockerPid: number): string {
   const escapedRelation = relation.replaceAll("'", "''");
   return `
-    SELECT COUNT(DISTINCT activity.pid)::text AS count
+    WITH RECURSIVE blocked AS (
+      SELECT activity.pid AS waiter_pid, unnest(pg_blocking_pids(activity.pid)) AS blocker_pid
+      FROM pg_stat_activity activity
+      WHERE activity.wait_event_type = 'Lock'
+      UNION
+      SELECT blocked.waiter_pid, unnest(pg_blocking_pids(blocked.blocker_pid))
+      FROM blocked
+      WHERE blocked.blocker_pid <> blocked.waiter_pid
+    )
+    SELECT COUNT(DISTINCT waiting.pid)::text AS count
     FROM pg_locks waiting
     JOIN pg_stat_activity activity ON activity.pid = waiting.pid
+    JOIN blocked ON blocked.waiter_pid = waiting.pid
     WHERE NOT waiting.granted
       AND activity.pid <> pg_backend_pid()
       AND activity.wait_event_type = 'Lock'
-      AND ${Number.isInteger(blockerPid) ? blockerPid : 0} = ANY(pg_blocking_pids(activity.pid))
+      AND blocked.blocker_pid = ${Number.isInteger(blockerPid) ? blockerPid : 0}
       AND (waiting.relation = '${escapedRelation}'::regclass OR waiting.locktype = 'transactionid')
   `;
 }
@@ -76,13 +87,23 @@ export function blockedTransactionPredicate(): string {
 
 export function blockedByPredicate(blockerPid: number): string {
   return `
+    WITH RECURSIVE blocked AS (
+      SELECT activity.pid AS waiter_pid, unnest(pg_blocking_pids(activity.pid)) AS blocker_pid
+      FROM pg_stat_activity activity
+      WHERE activity.wait_event_type = 'Lock'
+      UNION
+      SELECT blocked.waiter_pid, unnest(pg_blocking_pids(blocked.blocker_pid))
+      FROM blocked
+      WHERE blocked.blocker_pid <> blocked.waiter_pid
+    )
     SELECT COUNT(DISTINCT activity.pid)::text AS count
     FROM pg_locks waiting
     JOIN pg_stat_activity activity ON activity.pid = waiting.pid
+    JOIN blocked ON blocked.waiter_pid = activity.pid
     WHERE NOT waiting.granted
       AND activity.pid <> pg_backend_pid()
       AND activity.wait_event_type = 'Lock'
-      AND ${Number.isInteger(blockerPid) ? blockerPid : 0} = ANY(pg_blocking_pids(activity.pid))
+      AND blocked.blocker_pid = ${Number.isInteger(blockerPid) ? blockerPid : 0}
   `;
 }
 
