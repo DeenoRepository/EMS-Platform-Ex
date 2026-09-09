@@ -8,7 +8,8 @@
     "typecheck": "tsc -b",
     "clean": "tsc -b --clean",
     "test": "pnpm -r run test",
-    "check:boundaries": "node tools/check-boundaries.mjs"
+    "check:boundaries": "node tools/check-boundaries.mjs",
+    "check:boundaries:fixtures": "node tools/check-boundaries-fixtures.mjs"
   },
   "packageManager": "pnpm@11.16.0",
   "devDependencies": {

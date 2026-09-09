@@ -3,7 +3,14 @@ import path from 'node:path';
 import process from 'node:process';
 import ts from 'typescript';
 
-const root = process.cwd();
+const fixtureIndex = process.argv.indexOf('--fixture');
+const configuredRoot = fixtureIndex === -1 ? undefined : process.argv[fixtureIndex + 1];
+if (fixtureIndex !== -1 && (!configuredRoot || configuredRoot.startsWith('--'))) {
+  console.error('Usage: node tools/check-boundaries.mjs [--fixture <directory>]');
+  process.exit(2);
+}
+
+const root = configuredRoot ? path.resolve(process.cwd(), configuredRoot) : process.cwd();
 const packageRoots = new Map([
   ['@ems/contracts', 'packages/contracts'],
   ['@ems/core', 'packages/core'],
@@ -49,6 +56,7 @@ const allowed = new Map([
 
 for (const [packageName, relativeRoot] of packageRoots) {
   const packageRoot = path.resolve(root, relativeRoot);
+  if (!fs.existsSync(packageRoot)) continue;
   const packageJson = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf8'));
   const declared = new Set([
     ...Object.keys(packageJson.dependencies ?? {}),
@@ -110,12 +118,6 @@ function visit(name, chain) {
   visited.add(name);
 }
 for (const name of graph.keys()) visit(name, []);
-
-const fixture = process.argv[2];
-if (fixture === '--fixture-forbidden') {
-  errors.length = 0;
-  errors.push('fixture: forbidden dependency @ems/core from @ems/contracts');
-}
 
 if (errors.length > 0) {
   console.error(errors.join('\n'));
