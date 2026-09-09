@@ -48,6 +48,10 @@
     - *Содержание:* Утверждение tooling для frontend/LDAP, уточнение session transport и делегирования ролей, реализация IAM-инвариантов и синхронизация статусов Gate B.
     - *Статус:* Реализовано; ADR-0004 и ADR-0005 утверждены 2026-09-09. Gate B закрыт после PostgreSQL-приемки и независимого remediation-review.
 
+12. **Stage 2: минимальный сквозной сценарий**
+    - *Содержание:* ADR-0006 и `docs/specs/ems-stage2-minimal-flow.md`: Node 20 LTS, LDAP timeout 5 секунд, login backoff после пяти неудач, Origin/Fetch Metadata CSRF и app-owned React route map.
+    - *Статус:* Спецификация утверждена 2026-09-09; реализация начинается с server-only LDAP adapter.
+
 ## Локальное размещение планов
 
 - В текущем проекте: `.kilo/plans/*.md`
