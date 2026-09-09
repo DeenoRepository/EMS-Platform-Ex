@@ -8,6 +8,7 @@
     "typecheck": "tsc -b",
     "clean": "tsc -b --clean",
     "test": "pnpm -r run test",
+    "verify": "pnpm run typecheck && pnpm run check:boundaries && pnpm run check:boundaries:fixtures && pnpm run test",
     "check:boundaries": "node tools/check-boundaries.mjs",
     "check:boundaries:fixtures": "node tools/check-boundaries-fixtures.mjs"
   },

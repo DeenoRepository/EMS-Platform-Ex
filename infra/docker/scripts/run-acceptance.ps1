@@ -1,8 +1,8 @@
 # PowerShell script to execute real PostgreSQL acceptance tests against the isolated stand
 [CmdletBinding()]
 param(
-    [string]$MigrationUrl = "postgresql://ems_migration:migration_secret@localhost:5432/ems_test",
-    [string]$RuntimeUrl = "postgresql://ems_runtime:runtime_secret@localhost:5432/ems_test"
+    [string]$MigrationUrl = $env:EMS_TEST_PG_MIGRATION_URL,
+    [string]$RuntimeUrl = $env:EMS_TEST_PG_RUNTIME_URL
 )
 
 $ErrorActionPreference = "Stop"
@@ -10,6 +10,11 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $DockerDir = Split-Path -Parent $ScriptDir
 $InfraDir = Split-Path -Parent $DockerDir
 $RootDir = Split-Path -Parent $InfraDir
+
+if ([string]::IsNullOrWhiteSpace($MigrationUrl) -or [string]::IsNullOrWhiteSpace($RuntimeUrl)) {
+    Write-Error "Set EMS_TEST_PG_MIGRATION_URL and EMS_TEST_PG_RUNTIME_URL before running acceptance tests."
+    exit 1
+}
 
 Write-Host "=== EMS Platform: Running PostgreSQL Real Acceptance Tests ===" -ForegroundColor Cyan
 

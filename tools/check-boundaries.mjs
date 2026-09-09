@@ -11,17 +11,43 @@ if (fixtureIndex !== -1 && (!configuredRoot || configuredRoot.startsWith('--')))
 }
 
 const root = configuredRoot ? path.resolve(process.cwd(), configuredRoot) : process.cwd();
-const packageRoots = new Map([
-  ['@ems/contracts', 'packages/contracts'],
-  ['@ems/core', 'packages/core'],
-  ['@ems/shell', 'packages/shell'],
-  ['@ems/shared-controls', 'packages/shared-controls'],
-  ['@ems/demo-module', 'packages/demo-module'],
-  ['@ems/diagnostic-extension', 'packages/diagnostic-extension'],
-  ['@ems/web', 'apps/web'],
-]);
-const packageNames = new Map([...packageRoots].map(([name, relative]) => [path.resolve(root, relative), name]));
 const errors = [];
+const workspaceConfigPath = path.join(root, 'pnpm-workspace.yaml');
+const workspaceConfig = fs.existsSync(workspaceConfigPath) ? fs.readFileSync(workspaceConfigPath, 'utf8') : '';
+const workspaceGlobs = [...workspaceConfig.matchAll(/^\s*-\s*['"]([^'"]+)['"]\s*$/gm)].map((match) => match[1]);
+if (workspaceGlobs.length === 0) workspaceGlobs.push('packages/*', 'apps/*');
+const workspaceDirectories = workspaceGlobs.flatMap((glob) => {
+  const prefix = glob.endsWith('/*') ? glob.slice(0, -2) : glob;
+  const directory = path.resolve(root, prefix);
+  if (!fs.existsSync(directory)) return [];
+  return fs.readdirSync(directory, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(directory, entry.name));
+});
+const packageRoots = new Map();
+for (const packageRoot of workspaceDirectories) {
+  const packageJsonPath = path.join(packageRoot, 'package.json');
+  if (!fs.existsSync(packageJsonPath)) continue;
+  const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+  if (typeof packageJson.name !== 'string') {
+    errors.push(`${packageJsonPath}: workspace package must declare a name`);
+    continue;
+  }
+  packageRoots.set(packageJson.name, path.relative(root, packageRoot));
+}
+const discoveredRoots = ['packages', 'apps'].flatMap((directory) => {
+  const absolute = path.resolve(root, directory);
+  if (!fs.existsSync(absolute)) return [];
+  return fs.readdirSync(absolute, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => path.join(absolute, entry.name));
+});
+for (const packageRoot of discoveredRoots) {
+  if (!workspaceDirectories.includes(packageRoot)) {
+    errors.push(`${packageRoot}: workspace package is not covered by pnpm-workspace.yaml`);
+  }
+}
+const packageNames = new Map([...packageRoots].map(([name, relative]) => [path.resolve(root, relative), name]));
 const graph = new Map();
 
 function filesUnder(directory) {

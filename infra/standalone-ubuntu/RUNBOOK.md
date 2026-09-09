@@ -120,12 +120,27 @@ sudo bash 05-provision-app.sh /opt/ems-dist/ems-stand-bundle.tar.gz
 ```
 *Ожидаемый результат:* Приложение распаковано в `/opt/ems/app`, миграции `001` и `002` применены от имени роли `ems_migration`, служба `ems-web` запущена в статусе `active (running)`.
 
+Скрипт определяет режим по наличию схемы `ems_core` в `pg_namespace`. При отсутствии схемы вызывается `@ems/core` CLI `provision-clean`, который применяет полный набор миграций и единственным штатным путем устанавливает `bootstrap_state.status = 'ready'`. При наличии схемы вызывается `upgrade`; этот режим не переводит состояние в `ready`.
+
+### Обработка `locked-legacy`
+
+Если существующая база после `upgrade` имеет статус `locked-legacy`, provisioning завершается с ошибкой до перезапуска `ems-web`. Это означает, что схема уже существовала, но в ней не найден активный администратор; отсутствие администратора не является признаком чистой установки.
+
+Диагностика выполняется без изменения данных:
+
+```bash
+source /etc/ems/db-credentials.env
+PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -c "SELECT n.nspname AS schema_name, bs.status, COUNT(er.employee_id) FILTER (WHERE r.id = 'role.platform.admin' AND e.status = 'ACTIVE') AS active_admins FROM pg_namespace n LEFT JOIN ems_core.bootstrap_state bs ON TRUE LEFT JOIN ems_core.employee_roles er ON TRUE LEFT JOIN ems_core.roles r ON r.id = er.role_id LEFT JOIN ems_core.employees e ON e.id = er.employee_id WHERE n.nspname = 'ems_core' GROUP BY n.nspname, bs.status;"
+```
+
+Любая запись для снятия `locked-legacy` допускается только после отдельного решения владельца, проверки происхождения базы и фиксации решения в эксплуатационном протоколе. Автоматической команды разблокировки нет: ручное изменение статуса может повторно открыть одноразовый bootstrap и захватить административную учетную запись. До такого решения повторный запуск provisioning не должен использоваться для разблокировки.
+
 ---
 
 ## 4. Процедура инициализации первичного администратора (Bootstrap Runbook)
 
 В соответствии с требованиями `docs/specs/ems-core-mvp.md` (FR-009..012):
-1. Первичная инициализация системы (Bootstrap) возможна **только один раз**, когда в таблице `ems_core.bootstrap_state` статус равен `ready`.
+1. Первичная инициализация системы (Bootstrap) возможна **только один раз**, когда в таблице `ems_core.bootstrap_state` статус равен `ready`. Штатно `ready` возникает исключительно во время `provision-clean` на отсутствующей схеме `ems_core`; обычный `upgrade` не устанавливает это состояние.
 2. В Active Directory создана синтетическая учетная запись `bootstrap-admin@corp.local` (Пароль по умолчанию стенда: `Admin_Pass_Secret123!`).
 
 ### Порядок проведения Bootstrap:
@@ -163,6 +178,7 @@ sudo -u postgres psql -d ems_stand -c "SELECT version, applied_at, checksum FROM
 sudo systemctl stop ems-web
 
 # Выполнение отката последней миграции через psql от имени ems_migration
+# Примечание: 002 при upgrade отзывает все активные сессии с причиной UPGRADE_SECURITY_REVOCATION.
 source /etc/ems/db-credentials.env
 PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" \
     -f /opt/ems/app/packages/core/migrations/002_core_security_remediation.down.sql

@@ -29,8 +29,8 @@ else
     fi
 fi
 
-# 2. Apply PostgreSQL Migrations using ems_migration role
-echo "Applying database migrations as role 'ems_migration'..."
+# 2. Apply PostgreSQL migrations through the core migration CLI
+echo "Applying database migrations through the core migration CLI..."
 if [[ -f "$DB_CREDS" ]]; then
     source "$DB_CREDS"
 else
@@ -38,61 +38,31 @@ else
     exit 1
 fi
 
-MIGRATIONS_DIR="$APP_DIR/packages/core/migrations"
-if [[ ! -d "$MIGRATIONS_DIR" ]]; then
-    # Fallback to local source tree if running in repo context
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    ALT_MIGRATIONS="$SCRIPT_DIR/../../../packages/core/migrations"
-    if [[ -d "$ALT_MIGRATIONS" ]]; then
-        MIGRATIONS_DIR="$ALT_MIGRATIONS"
-    fi
+if [[ -z "${EMS_MIGRATION_USER:-}" || -z "${EMS_MIGRATION_PASSWORD:-}" || -z "${EMS_DB_NAME:-}" ]]; then
+    echo "ERROR: EMS_MIGRATION_USER, EMS_MIGRATION_PASSWORD and EMS_DB_NAME must be set in $DB_CREDS." >&2
+    exit 1
 fi
 
-if [[ -d "$MIGRATIONS_DIR" ]]; then
-    echo "Running migrations from $MIGRATIONS_DIR..."
-    # Ensure migration table exists
-    PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" <<EOF
-CREATE SCHEMA IF NOT EXISTS ems_core;
-CREATE TABLE IF NOT EXISTS ems_core.schema_migrations (
-    version VARCHAR(64) PRIMARY KEY,
-    checksum VARCHAR(128),
-    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-EOF
+MIGRATION_URL="postgresql://${EMS_MIGRATION_USER}:${EMS_MIGRATION_PASSWORD}@127.0.0.1:5432/${EMS_DB_NAME}"
+export EMS_MIGRATION_URL="$MIGRATION_URL"
+CLI="$APP_DIR/packages/core/dist/cli/migrate.js"
+if [[ ! -f "$CLI" ]]; then
+    echo "ERROR: Migration CLI not found at $CLI." >&2
+    exit 1
+fi
 
-    # Apply 001 and 002 if not applied
-    for mig in "001_core_schema" "002_core_security_remediation"; do
-        SQL_FILE="$MIGRATIONS_DIR/${mig}.sql"
-        if [[ -f "$SQL_FILE" ]]; then
-            APPLIED=$(PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -t -A -c "SELECT COUNT(1) FROM ems_core.schema_migrations WHERE version = '$mig';")
-            if [[ "$APPLIED" == "0" ]]; then
-                echo "  Applying migration $mig..."
-                CHECKSUM=$(sha256sum "$SQL_FILE" | awk '{print $1}')
-                PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" \
-                    -v ON_ERROR_STOP=1 --single-transaction <<MIG_EOF
-\i $SQL_FILE
-INSERT INTO ems_core.schema_migrations (version, checksum) VALUES ('$mig', '$CHECKSUM');
-MIG_EOF
-            else
-                echo "  Migration $mig already applied."
-            fi
-        fi
-    done
-
-    # Clean stand provisioning: if no platform administrator exists yet, ensure bootstrap_state is 'ready' for initial admin setup
-    ADMIN_EXISTS=$(PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -t -A -c "
-        SELECT COUNT(1) FROM ems_core.employee_roles er
-        JOIN ems_core.employees e ON e.id = er.employee_id
-        WHERE er.role_id = 'role.platform.admin' AND e.status = 'ACTIVE';")
-    if [[ "$ADMIN_EXISTS" == "0" ]]; then
-        echo "Clean stand detected (no active admins). Initializing bootstrap_state to 'ready'..."
-        PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -v ON_ERROR_STOP=1 -c "
-            INSERT INTO ems_core.bootstrap_state (id, status)
-            VALUES (1, 'ready')
-            ON CONFLICT (id) DO UPDATE SET status = 'ready', updated_at = NOW();"
+SCHEMA_EXISTS=$(PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -t -A -v ON_ERROR_STOP=1 -c "SELECT EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'ems_core');")
+if [[ "$SCHEMA_EXISTS" == "t" ]]; then
+    echo "Existing ems_core schema detected; running upgrade..."
+    node "$CLI" upgrade
+    BOOTSTRAP_STATUS=$(PGPASSWORD="$EMS_MIGRATION_PASSWORD" psql -h 127.0.0.1 -U "$EMS_MIGRATION_USER" -d "$EMS_DB_NAME" -t -A -v ON_ERROR_STOP=1 -c "SELECT status FROM ems_core.bootstrap_state WHERE id = 1;")
+    if [[ "$BOOTSTRAP_STATUS" == "locked-legacy" ]]; then
+        echo "ERROR: Existing database is locked-legacy. Follow the RUNBOOK locked-legacy procedure; no automatic unlock was performed." >&2
+        exit 1
     fi
 else
-    echo "WARNING: Migrations directory not found at $MIGRATIONS_DIR. Skipping direct SQL application."
+    echo "ems_core schema is absent; running clean provisioning..."
+    node "$CLI" provision-clean
 fi
 
 # 3. Set file ownership

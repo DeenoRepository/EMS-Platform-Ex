@@ -6,8 +6,13 @@ DOCKER_DIR="$(dirname "$SCRIPT_DIR")"
 INFRA_DIR="$(dirname "$DOCKER_DIR")"
 ROOT_DIR="$(dirname "$INFRA_DIR")"
 
-MIGRATION_URL="${EMS_TEST_PG_MIGRATION_URL:-postgresql://ems_migration:migration_secret@localhost:5432/ems_test}"
-RUNTIME_URL="${EMS_TEST_PG_RUNTIME_URL:-postgresql://ems_runtime:runtime_secret@localhost:5432/ems_test}"
+if [[ -z "${EMS_TEST_PG_MIGRATION_URL:-}" || -z "${EMS_TEST_PG_RUNTIME_URL:-}" ]]; then
+    echo "ERROR: Set EMS_TEST_PG_MIGRATION_URL and EMS_TEST_PG_RUNTIME_URL before running acceptance tests." >&2
+    exit 1
+fi
+
+MIGRATION_URL="$EMS_TEST_PG_MIGRATION_URL"
+RUNTIME_URL="$EMS_TEST_PG_RUNTIME_URL"
 
 echo "=== EMS Platform: Running PostgreSQL Real Acceptance Tests ==="
 

@@ -19,15 +19,14 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
     if (isAcceptanceRun) {
       throw new Error('PostgreSQL acceptance requires EMS_TEST_PG_INTEGRATION=true, EMS_TEST_PG_MIGRATION_URL and EMS_TEST_PG_RUNTIME_URL');
     }
-    test('PostgreSQL стенд не настроен (явный opt-in EMS_TEST_PG_INTEGRATION=true)', () => {
+    test('PostgreSQL стенд не настроен (явный opt-in EMS_TEST_PG_INTEGRATION=true)', { skip: 'Изолированный PostgreSQL стенд не настроен' }, () => {
       // Согласно плану (п. 26, 86): без разрешенного изолированного стенда не подключаться к произвольной БД.
       // Не заменять отсутствие стенда mock-проверкой и не выдавать silent skip за приемку.
       console.warn(
         '[EMS Acceptance Gate] PostgreSQL integration stand is not active. ' +
         'To run real PostgreSQL integration tests against an isolated ephemeral stand, ' +
-        'set EMS_TEST_PG_INTEGRATION=true and provide EMS_TEST_PG_URL / EMS_TEST_PG_MIGRATION_URL.',
+        'set EMS_TEST_PG_INTEGRATION=true and provide EMS_TEST_PG_MIGRATION_URL / EMS_TEST_PG_RUNTIME_URL.',
       );
-      assert.ok(true, 'PostgreSQL integration check status recorded');
     });
     return;
   }
