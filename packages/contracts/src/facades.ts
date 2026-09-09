@@ -141,6 +141,7 @@ export interface IdentityFacade {
 
 export interface AuthorizationFacade {
   authorize(input: AuthorizeInput): Promise<Result<AuthorizeOutput>>;
+  authorizeBackground(input: AuthorizeInput): Promise<Result<AuthorizeOutput>>;
 }
 
 export interface AdministrationFacade {

@@ -233,7 +233,8 @@ class MockDatabasePool {
         !s.revoked_at &&
         new Date(s.expires_at).getTime() > now &&
         new Date(s.idle_expires_at).getTime() > now &&
-        new Date(s.idle_expires_at).getTime() < now + params[2]
+        new Date(s.idle_expires_at).getTime() < now + params[2] &&
+        new Date(s.idle_expires_at).getTime() < new Date(s.expires_at).getTime()
       ) {
         s.idle_expires_at = new Date(Math.min(now + params[1], new Date(s.expires_at).getTime())).toISOString();
         return { rows: [s], rowCount: 1 };
@@ -644,6 +645,51 @@ describe('Postgres Core Facades unit tests (in-memory simulator)', () => {
     const denied = await authzFacade.authorize({ credential: loginRes.value.credential, permission: 'not-granted' });
     assert.equal(denied.ok, true);
     assert.equal(session.idle_expires_at, renewed);
+  });
+
+  test('фоновой authorize не продлевает idle TTL, но проверяет права', async () => {
+    const mockDb = new MockDatabasePool() as any;
+    const identityFacade = new PostgresIdentityFacade(mockDb, fakeLdap, fakeLdap, defaultOperatorPort);
+    const authzFacade = new PostgresAuthorizationFacade(mockDb);
+    await identityFacade.bootstrap({ upn: 'background-admin@corp.local', initialDepartmentId: 'dept-platform' });
+    const loginRes = await identityFacade.login({ upn: 'background-admin@corp.local', password: 'password' });
+    assert.equal(loginRes.ok, true);
+    if (!loginRes.ok) return;
+    const hash = (await import('./subject-auth.js')).hashCredential(loginRes.value.credential.value);
+    const session = mockDb.sessions.get(hash);
+    session.idle_expires_at = new Date(Date.now() + 1_000).toISOString();
+    const before = session.idle_expires_at;
+    const allowed = await authzFacade.authorizeBackground({ credential: loginRes.value.credential, permission: 'platform.admin' });
+    assert.deepEqual(allowed, { ok: true, value: { allowed: true } });
+    assert.equal(session.idle_expires_at, before);
+  });
+
+  test('заблокированный сотрудник не реактивируется обычным назначением', async () => {
+    const mockDb = new MockDatabasePool() as any;
+    const identityFacade = new PostgresIdentityFacade(mockDb, fakeLdap, fakeLdap, defaultOperatorPort);
+    const adminFacade = new PostgresAdministrationFacade(mockDb);
+    await identityFacade.bootstrap({ upn: 'blocked-admin@corp.local', initialDepartmentId: 'dept-platform' });
+    const adminLogin = await identityFacade.login({ upn: 'blocked-admin@corp.local', password: 'password' });
+    assert.equal(adminLogin.ok, true);
+    if (!adminLogin.ok) return;
+    const blockedLogin = await identityFacade.login({ upn: 'blocked-target@corp.local', password: 'password' });
+    assert.equal(blockedLogin.ok, true);
+    if (!blockedLogin.ok) return;
+    const target = mockDb.employees.get(blockedLogin.value.session.employeeId);
+    target.status = 'BLOCKED';
+    target.department_id = null;
+    const beforeVersion = target.version;
+    const result = await adminFacade.assignEmployee({
+      actorCredential: adminLogin.value.credential,
+      employeeId: target.id,
+      departmentId: 'dept-platform',
+      roleIds: [],
+      expectedVersion: beforeVersion,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, 'FORBIDDEN');
+    assert.equal(target.status, 'BLOCKED');
+    assert.equal(target.version, beforeVersion);
   });
 
   test('выход из системы отзывает сессию (SessionFacade, FR-028)', async () => {

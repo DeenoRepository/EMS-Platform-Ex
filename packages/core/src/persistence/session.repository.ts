@@ -63,7 +63,8 @@ export class SessionRepository {
          AND revoked_at IS NULL
          AND expires_at > NOW()
          AND idle_expires_at > NOW()
-         AND idle_expires_at < NOW() + ($3 * INTERVAL '1 millisecond')
+          AND idle_expires_at < NOW() + ($3 * INTERVAL '1 millisecond')
+          AND idle_expires_at < expires_at
        RETURNING id, employee_id, credential_hash, format_version, created_at::text, expires_at::text, idle_expires_at::text, revoked_at::text, revocation_reason`,
       [hash, idleTtlMs, renewThresholdMs],
     );

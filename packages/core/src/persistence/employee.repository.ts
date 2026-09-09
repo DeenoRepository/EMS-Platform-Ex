@@ -175,7 +175,10 @@ export class EmployeeRepository {
   ): Promise<EmployeeRow | null> {
     let updateSql = `
       UPDATE ems_core.employees
-      SET department_id = $1, status = 'ACTIVE', version = version + 1, updated_at = NOW()
+      SET department_id = $1,
+          status = CASE WHEN status = 'PENDING' THEN 'ACTIVE' ELSE status END,
+          version = version + 1,
+          updated_at = NOW()
       WHERE id = $2
     `;
     const params: any[] = [departmentId, employeeId];

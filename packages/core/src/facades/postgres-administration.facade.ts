@@ -177,6 +177,14 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
           });
         }
 
+        if (lockedTarget.status === 'BLOCKED') {
+          throw new TransactionAbortError({
+            code: 'FORBIDDEN',
+            message: 'Заблокированного сотрудника нельзя активировать обычным назначением',
+            retryable: false,
+          });
+        }
+
         const addedRoleIds = uniqueRoleIds.filter((roleId) => !currentRoles.includes(roleId));
         const removedRoleIds = currentRoles.filter((roleId) => !uniqueRoleIds.includes(roleId));
         const delegatedPermissions = await this.roleRepo.getPermissionsForRoles(

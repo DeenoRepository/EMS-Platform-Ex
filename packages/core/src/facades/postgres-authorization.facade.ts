@@ -23,6 +23,17 @@ export class PostgresAuthorizationFacade implements AuthorizationFacade {
   constructor(private readonly pool: DatabasePool) {}
 
   async authorize(input: AuthorizeInput): Promise<Result<AuthorizeOutput>> {
+    return this.authorizeInternal(input, true);
+  }
+
+  async authorizeBackground(input: AuthorizeInput): Promise<Result<AuthorizeOutput>> {
+    return this.authorizeInternal(input, false);
+  }
+
+  private async authorizeInternal(
+    input: AuthorizeInput,
+    renewIdle: boolean,
+  ): Promise<Result<AuthorizeOutput>> {
     if (!input || typeof input !== 'object') {
       return fail({
         code: 'VALIDATION_FAILED',
@@ -107,17 +118,19 @@ export class PostgresAuthorizationFacade implements AuthorizationFacade {
       });
     }
 
-    try {
-      // Authorization is not transactional; concurrent renewals are harmless because
-      // the update is throttled and LEAST() preserves the absolute deadline.
-      await this.sessionRepo.renewIdle(
-        this.pool,
-        hashCredential(input.credential!.value),
-        IDLE_TTL_MS,
-        IDLE_RENEW_THRESHOLD_MS,
-      );
-    } catch {
-      // A renewal failure must not turn an already successful authorization into denial.
+    if (renewIdle) {
+      try {
+        // Authorization is not transactional; concurrent renewals are harmless because
+        // the update is throttled and LEAST() preserves the absolute deadline.
+        await this.sessionRepo.renewIdle(
+          this.pool,
+          hashCredential(input.credential!.value),
+          IDLE_TTL_MS,
+          IDLE_RENEW_THRESHOLD_MS,
+        );
+      } catch {
+        // A renewal failure must not turn an already successful authorization into denial.
+      }
     }
 
     return ok({ allowed: true });

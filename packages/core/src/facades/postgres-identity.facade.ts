@@ -33,6 +33,8 @@ class TransactionAbortError extends Error {
   }
 }
 
+class BlockedLoginError extends TransactionAbortError {}
+
 export class PostgresIdentityFacade implements IdentityFacade {
   private readonly employeeRepo = new EmployeeRepository();
   private readonly departmentRepo = new DepartmentRepository();
@@ -99,15 +101,7 @@ export class PostgresIdentityFacade implements IdentityFacade {
         });
 
         if (employee.status === 'BLOCKED') {
-          await this.auditRepo.insert(client, {
-            id: crypto.randomUUID(),
-            subjectId: employee.id,
-            action: 'LOGIN_BLOCKED',
-            objectType: 'employee',
-            objectId: employee.id,
-            result: 'FAILURE',
-          });
-          throw new TransactionAbortError({
+          throw new BlockedLoginError({
             code: 'FORBIDDEN',
             message: 'Учетная запись сотрудника заблокирована',
             retryable: false,
@@ -171,6 +165,9 @@ export class PostgresIdentityFacade implements IdentityFacade {
       });
     } catch (err) {
       if (err instanceof TransactionAbortError) {
+        if (err instanceof BlockedLoginError) {
+          await this.recordBlockedLoginAudit(ldapUser).catch(() => undefined);
+        }
         return fail(err.appError);
       }
       return fail({
@@ -179,6 +176,21 @@ export class PostgresIdentityFacade implements IdentityFacade {
         retryable: true,
       });
     }
+  }
+
+  private async recordBlockedLoginAudit(identity: DirectoryIdentity): Promise<void> {
+    await this.pool.withTransaction(async (client) => {
+      const employee = await this.employeeRepo.findByDirectoryGuid(client, identity.directoryId, identity.objectGuid);
+      if (!employee || employee.status !== 'BLOCKED') return;
+      await this.auditRepo.insert(client, {
+        id: crypto.randomUUID(),
+        subjectId: employee.id,
+        action: 'LOGIN_BLOCKED',
+        objectType: 'employee',
+        objectId: employee.id,
+        result: 'FAILURE',
+      });
+    });
   }
 
   async bootstrap(input: BootstrapInput): Promise<Result<BootstrapOutput>> {
