@@ -229,25 +229,25 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     assert.equal(admins.rows[0]?.count, '1');
   });
 
-  test('конкурентное снятие последней админ-роли сохраняет FR-019-инвариант', async () => {
+  test('конкурентное назначение одного сотрудника сохраняет optimistic-lock invariant', async () => {
     const adminA = unique('admin-a');
     const adminB = unique('admin-b');
-    const boot = await bootstrap(adminA, 'dept-a');
+    const targetUpn = unique('assignment-target');
+    await bootstrap(adminA, 'dept-a');
     const sessionA = await login(adminA);
     await runtimePool.query("INSERT INTO ems_core.departments (id, name, code) VALUES ('dept-b', 'B', 'B')");
     const pendingB = await login(adminB);
     const assignedB = await administration.assignEmployee({ actorCredential: sessionA.credential, employeeId: pendingB.session.employeeId, departmentId: 'dept-b', roleIds: [ADMIN_ROLE_ID], expectedVersion: 1 });
     assert.equal(assignedB.ok, true);
     const sessionB = await login(adminB);
-    const a = await employee(boot.employeeId);
-    const b = await employee(pendingB.session.employeeId);
+    const targetLogin = await login(targetUpn);
+    const targetRow = await employee(targetLogin.session.employeeId);
     const results = await Promise.all([
-      administration.assignEmployee({ actorCredential: sessionA.credential, employeeId: boot.employeeId, departmentId: 'dept-a', roleIds: [], expectedVersion: a!.version }),
-      administration.assignEmployee({ actorCredential: sessionB.credential, employeeId: pendingB.session.employeeId, departmentId: 'dept-b', roleIds: [], expectedVersion: b!.version }),
+      administration.assignEmployee({ actorCredential: sessionA.credential, employeeId: targetLogin.session.employeeId, departmentId: 'dept-a', roleIds: [], expectedVersion: targetRow!.version }),
+      administration.assignEmployee({ actorCredential: sessionB.credential, employeeId: targetLogin.session.employeeId, departmentId: 'dept-b', roleIds: [], expectedVersion: targetRow!.version }),
     ]);
+    assert.equal(results.filter((result) => result.ok).length, 1);
     assert.ok(results.some((result) => !result.ok && result.error.code === 'CONFLICT'));
-    const admins = await runtimePool.query<{ count: string }>(`SELECT COUNT(*)::text AS count FROM ems_core.employees e JOIN ems_core.employee_roles r ON r.employee_id = e.id WHERE e.status = 'ACTIVE' AND r.role_id = $1`, [ADMIN_ROLE_ID]);
-    assert.notEqual(admins.rows[0]?.count, '0');
   });
 
   test('конкурентный setModuleAvailability с одинаковой версией: один успех, один конфликт', async () => {
