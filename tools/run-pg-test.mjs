@@ -1,7 +1,12 @@
 import { spawnSync } from 'node:child_process';
 import process from 'node:process';
 
-const test = spawnSync(process.execPath, ['--test', 'dist/persistence/pg-integration.test.js'], {
+const test = spawnSync(process.execPath, [
+  '--test',
+  '--test-concurrency=1',
+  'dist/persistence/pg-integration.test.js',
+  'dist/facades/facades-pg-integration.test.js',
+], {
   stdio: 'inherit',
   env: {
     ...process.env,
