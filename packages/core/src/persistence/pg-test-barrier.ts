@@ -74,4 +74,16 @@ export function blockedTransactionPredicate(): string {
   `;
 }
 
+export function blockedByPredicate(blockerPid: number): string {
+  return `
+    SELECT COUNT(DISTINCT activity.pid)::text AS count
+    FROM pg_locks waiting
+    JOIN pg_stat_activity activity ON activity.pid = waiting.pid
+    WHERE NOT waiting.granted
+      AND activity.pid <> pg_backend_pid()
+      AND activity.wait_event_type = 'Lock'
+      AND ${Number.isInteger(blockerPid) ? blockerPid : 0} = ANY(pg_blocking_pids(activity.pid))
+  `;
+}
+
 export type PgClient = pg.PoolClient;

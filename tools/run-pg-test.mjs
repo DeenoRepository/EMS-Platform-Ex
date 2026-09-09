@@ -8,10 +8,15 @@ const test = spawnSync(process.execPath, [
   'dist/facades/facades-pg-integration.test.js',
 ], {
   stdio: 'inherit',
+  timeout: 120000,
   env: {
     ...process.env,
     EMS_TEST_PG_REQUIRED: 'true',
+    PGOPTIONS: `${process.env.PGOPTIONS ?? ''} -c statement_timeout=15000 -c lock_timeout=5000`.trim(),
   },
 });
 
+if (test.error) {
+  console.error(`PostgreSQL acceptance runner failed: ${test.error.message}`);
+}
 process.exit(test.status ?? 1);

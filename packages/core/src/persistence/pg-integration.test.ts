@@ -107,6 +107,42 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
     }
   });
 
+  test('upgrade 001 -> 002 сохраняет legacy data и отзывает старые сессии', async () => {
+    const migrationPool = new DatabasePool({ connectionString: migrationUrl });
+    const runtimePool = new DatabasePool({ connectionString: runtimeUrl });
+    const migrator = new SchemaMigrator(migrationPool);
+    try {
+      await migrator.teardownEphemeralSchema();
+      await migrator.applyMigration({ id: '001_core_schema', upSql: up001, downSql: down001 });
+      await runtimePool.query(`
+        INSERT INTO ems_core.departments (id, name, code) VALUES ('dept-legacy', 'Legacy', 'LEGACY');
+        INSERT INTO ems_core.roles (id, name, is_system) VALUES ('role.platform.admin', 'Admin', true);
+        INSERT INTO ems_core.role_permissions (role_id, permission_id) VALUES ('role.platform.admin', 'platform.admin');
+        INSERT INTO ems_core.employees (id, directory_id, object_guid, upn, display_name, status, department_id)
+        VALUES ('emp-legacy', 'corp.local', 'guid-legacy', 'legacy@corp.local', 'Legacy', 'ACTIVE', 'dept-legacy');
+        INSERT INTO ems_core.employee_roles (employee_id, role_id) VALUES ('emp-legacy', 'role.platform.admin');
+        INSERT INTO ems_core.sessions (id, employee_id, expires_at, idle_expires_at)
+        VALUES ('legacy-session', 'emp-legacy', NOW() + INTERVAL '1 hour', NOW() + INTERVAL '30 minutes');
+      `);
+      await migrator.applyMigration({ id: '002_core_security_remediation', upSql: up002, downSql: down002 });
+      const state = await runtimePool.query<{ status: string }>('SELECT status FROM ems_core.bootstrap_state WHERE id = 1');
+      assert.equal(state.rows[0]?.status, 'completed');
+      const session = await runtimePool.query<{ revoked_at: string | null; revocation_reason: string | null }>(
+        'SELECT revoked_at::text, revocation_reason FROM ems_core.sessions WHERE id = $1', ['legacy-session'],
+      );
+      assert.equal(session.rows[0]?.revocation_reason, 'UPGRADE_SECURITY_REVOCATION');
+      const format = await runtimePool.query<{ format_version: number }>('SELECT format_version FROM ems_core.sessions WHERE id = $1', ['legacy-session']);
+      assert.equal(format.rows[0]?.format_version, 1);
+      await migrator.applyMigration({ id: '002_core_security_remediation', upSql: up002, downSql: down002 });
+      const repeat = await runtimePool.query<{ count: string }>("SELECT COUNT(*)::text AS count FROM ems_core.schema_migrations WHERE version = '002_core_security_remediation'");
+      assert.equal(repeat.rows[0]?.count, '1');
+    } finally {
+      await migrator.teardownEphemeralSchema();
+      await runtimePool.close();
+      await migrationPool.close();
+    }
+  });
+
   test('upgrade без администратора устанавливает locked-legacy навсегда', async () => {
     const migrationPool = new DatabasePool({ connectionString: migrationUrl });
     const runtimePool = new DatabasePool({ connectionString: runtimeUrl });
@@ -224,6 +260,33 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
       } while (cursor);
       assert.deepEqual(pages, ['audit-5', 'audit-4', 'audit-3', 'audit-2', 'audit-1']);
       assert.equal(new Set(pages).size, 5);
+    } finally {
+      await runtimePool.close();
+      await migrationPool.close();
+    }
+  });
+
+  test('AuditRepository не пропускает записи с микросекундами внутри одной миллисекунды', async () => {
+    const { migrationPool, runtimePool } = await cleanDatabase();
+    try {
+      await runtimePool.query(`
+        INSERT INTO ems_core.audit_log (id, timestamp, subject_id, action, object_type, object_id, result)
+        VALUES
+          ('micro-a', '2026-01-01 00:00:00.001001+00', 'micro', 'MICRO', 'test', 'a', 'SUCCESS'),
+          ('micro-b', '2026-01-01 00:00:00.001002+00', 'micro', 'MICRO', 'test', 'b', 'SUCCESS'),
+          ('micro-c', '2026-01-01 00:00:00.001003+00', 'micro', 'MICRO', 'test', 'c', 'SUCCESS'),
+          ('micro-d', '2026-01-01 00:00:00.001004+00', 'micro', 'MICRO', 'test', 'd', 'SUCCESS');
+      `);
+      const audit = new AuditRepository();
+      const pages: string[] = [];
+      let cursor: string | undefined;
+      do {
+        const page = await audit.query(runtimePool, { action: 'MICRO', limit: 2, cursor });
+        pages.push(...page.items.map((item) => item.id));
+        cursor = page.nextCursor;
+      } while (cursor);
+      assert.deepEqual(pages, ['micro-d', 'micro-c', 'micro-b', 'micro-a']);
+      assert.equal(new Set(pages).size, 4);
     } finally {
       await runtimePool.close();
       await migrationPool.close();

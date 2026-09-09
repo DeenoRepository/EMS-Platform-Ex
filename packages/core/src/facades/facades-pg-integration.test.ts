@@ -250,6 +250,100 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     assert.ok(results.some((result) => !result.ok && result.error.code === 'CONFLICT'));
   });
 
+  test('взаимное конкурентное снятие admin-ролей сохраняет одного администратора', async () => {
+    const adminA = unique('mutual-admin-a');
+    const adminB = unique('mutual-admin-b');
+    await bootstrap(adminA, 'dept-mutual-a');
+    const sessionA = await login(adminA);
+    const pendingB = await login(adminB);
+    const assignedB = await administration.assignEmployee({
+      actorCredential: sessionA.credential,
+      employeeId: pendingB.session.employeeId,
+      departmentId: 'dept-mutual-a',
+      roleIds: [ADMIN_ROLE_ID],
+      expectedVersion: 1,
+    });
+    assert.equal(assignedB.ok, true);
+    const sessionB = await login(adminB);
+    const rowA = await employee(sessionA.session.employeeId);
+    const rowB = await employee(sessionB.session.employeeId);
+    const results = await Promise.all([
+      administration.assignEmployee({
+        actorCredential: sessionA.credential,
+        employeeId: sessionB.session.employeeId,
+        departmentId: 'dept-mutual-a',
+        roleIds: [],
+        expectedVersion: rowB!.version,
+      }),
+      administration.assignEmployee({
+        actorCredential: sessionB.credential,
+        employeeId: sessionA.session.employeeId,
+        departmentId: 'dept-mutual-a',
+        roleIds: [],
+        expectedVersion: rowA!.version,
+      }),
+    ]);
+    assert.equal(results.filter((result) => result.ok).length, 1);
+    assert.ok(results.some((result) => !result.ok && ['UNAUTHENTICATED', 'CONFLICT'].includes(result.error.code)));
+
+    const admins = await runtimePool.query<{ employee_id: string }>(
+      `SELECT e.id AS employee_id
+       FROM ems_core.employees e
+       JOIN ems_core.employee_roles er ON er.employee_id = e.id
+       WHERE e.status = 'ACTIVE' AND er.role_id = $1`,
+      [ADMIN_ROLE_ID],
+    );
+    assert.equal(admins.rows.length, 1);
+    const survivorId = admins.rows[0]!.employee_id;
+    const revoked = await runtimePool.query<{ revoked_at: string | null }>(
+      'SELECT revoked_at::text FROM ems_core.sessions WHERE employee_id = $1 AND revoked_at IS NOT NULL',
+      [survivorId === sessionA.session.employeeId ? sessionB.session.employeeId : sessionA.session.employeeId],
+    );
+    assert.ok(revoked.rows.length >= 1);
+  });
+
+  test('отказ аудита откатывает login и assignment на PostgreSQL', async () => {
+    const adminUpn = unique('fault-admin');
+    const targetUpn = unique('fault-target');
+    await bootstrap(adminUpn, 'dept-fault');
+    const adminSession = await login(adminUpn);
+    const targetSession = await login(targetUpn);
+    await migrationPool.query(`
+      CREATE OR REPLACE FUNCTION ems_core.reject_audit_insert() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic audit failure'; END; $$;
+      CREATE TRIGGER reject_audit_insert BEFORE INSERT ON ems_core.audit_log
+      FOR EACH ROW EXECUTE FUNCTION ems_core.reject_audit_insert();
+    `);
+    try {
+      const faultLoginUpn = unique('fault-login');
+      const loginResult = await identity.login({ upn: faultLoginUpn, password: 'synthetic-password' });
+      assert.equal(loginResult.ok, false);
+      const loginCount = await runtimePool.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM ems_core.employees WHERE upn = $1', [faultLoginUpn],
+      );
+      assert.equal(loginCount.rows[0]?.count, '0');
+
+      const before = await employee(targetSession.session.employeeId);
+      const assignment = await administration.assignEmployee({
+        actorCredential: adminSession.credential,
+        employeeId: targetSession.session.employeeId,
+        departmentId: 'dept-fault',
+        roleIds: [],
+        expectedVersion: before!.version,
+      });
+      assert.equal(assignment.ok, false);
+      const after = await employee(targetSession.session.employeeId);
+      assert.equal(after?.version, before?.version);
+      assert.equal(after?.department_id, before?.department_id);
+      const sessions = await runtimePool.query<{ revoked_at: string | null }>(
+        'SELECT revoked_at::text FROM ems_core.sessions WHERE employee_id = $1', [targetSession.session.employeeId],
+      );
+      assert.equal(sessions.rows.some((row) => row.revoked_at !== null), false);
+    } finally {
+      await migrationPool.query('DROP TRIGGER IF EXISTS reject_audit_insert ON ems_core.audit_log; DROP FUNCTION IF EXISTS ems_core.reject_audit_insert();');
+    }
+  });
+
   test('конкурентный setModuleAvailability с одинаковой версией: один успех, один конфликт', async () => {
     const upn = unique('module-admin');
     await bootstrap(upn, 'dept-module');
