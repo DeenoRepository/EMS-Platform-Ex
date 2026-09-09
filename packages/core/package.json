@@ -5,10 +5,17 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "ems-migrate": "./dist/cli/migrate.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./cli": {
+      "types": "./dist/cli/migrate.d.ts",
+      "default": "./dist/cli/migrate.js"
     }
   },
   "dependencies": {
@@ -18,7 +25,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/registry.test.js dist/facades/facades.test.js dist/persistence/migrator.test.js dist/persistence/pg-integration.test.js",
+    "test": "tsc && node --test dist/registry.test.js dist/facades/facades.test.js dist/persistence/migrator.test.js dist/persistence/pg-integration.test.js dist/cli/migrate.test.js",
     "test:pg": "node ../../tools/require-pg-acceptance.mjs && tsc && node ../../tools/run-pg-test.mjs"
   },
   "devDependencies": {
