@@ -172,7 +172,8 @@ describe('Валидация UPN и конфигурации', () => {
     assert.equal(isAcceptableUpn('user@'), false);
     assert.equal(isAcceptableUpn('user\u0000@example.test'), false);
     assert.equal(isAcceptableUpn('user name@example.test'), false);
-    assert.equal(isAcceptableUpn(`${'x'.repeat(250)}@example.test`), false);
+    assert.equal(isAcceptableUpn(`${'x'.repeat(242)}@example.test`), true, 'длина 255 символов допустима для VARCHAR(255)');
+    assert.equal(isAcceptableUpn(`${'x'.repeat(243)}@example.test`), false, 'длина 256 символов превышает VARCHAR(255)');
     assert.equal(isAcceptableUpn(undefined), false);
     assert.equal(isAcceptableUpn(123), false);
   });
@@ -359,6 +360,14 @@ describe('resolveByUpn', () => {
     const second = await new LdapDirectoryAdapter(baseConfig(), withoutUpn.factory)
       .resolveByUpn('ivan.petrov@example.test');
     assert.equal(second.ok, false);
+
+    const overlyLongUpn = createHarness({
+      entries: [defaultEntry({ userPrincipalName: `${'x'.repeat(243)}@example.test` })],
+    });
+    const third = await new LdapDirectoryAdapter(baseConfig(), overlyLongUpn.factory)
+      .resolveByUpn('ivan.petrov@example.test');
+    assert.equal(third.ok, false);
+    assert.equal(third.ok === false && third.error.code, 'DEPENDENCY_UNAVAILABLE');
   });
 
   test('некорректный UPN не доходит до каталога', async () => {
@@ -477,15 +486,16 @@ describe('authenticate', () => {
     assert.equal(calls.filter((call) => call.kind === 'unbind').length, 1);
   });
 
-  test('отказ сервисного bind не выдается как неверный пароль пользователя', async () => {
+  test('отказ сервисного bind классифицируется как отказ инфраструктуры, а не пользователя', async () => {
     const { factory } = createHarness({ serviceBindError: new InvalidCredentialsLike() });
     const adapter = new LdapDirectoryAdapter(baseConfig(), factory);
     const result = await adapter.resolveByUpn('ivan.petrov@example.test');
     assert.equal(result.ok, false);
-    assert.equal(result.ok === false && result.error.code, 'UNAUTHENTICATED');
-    assert.notEqual(
+    assert.equal(result.ok === false && result.error.code, 'DEPENDENCY_UNAVAILABLE');
+    assert.equal(result.ok === false && result.error.retryable, true);
+    assert.equal(
       result.ok === false && result.error.message,
-      'Неверное имя пользователя или пароль',
+      'Служба каталога отклонила учетные данные сервисного доступа',
     );
   });
 });

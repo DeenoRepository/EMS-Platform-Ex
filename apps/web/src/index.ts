@@ -1,4 +1,4 @@
-import { ExtensionRegistry } from '@ems/core';
+import { ExtensionRegistry } from '@ems/core/registry';
 import { demoModuleManifest } from '@ems/demo-module';
 import {
   diagnosticExtensionManifest,

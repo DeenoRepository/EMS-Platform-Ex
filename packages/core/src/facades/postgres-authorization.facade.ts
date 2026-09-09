@@ -11,10 +11,7 @@ import { SessionRepository } from '../persistence/session.repository.js';
 import { hashCredential } from './subject-auth.js';
 import { verifySubjectCredential } from './subject-auth.js';
 import { dependencyFailure } from './errors.js';
-
-const IDLE_TTL_MS = 30 * 60 * 1000;
-const IDLE_RENEW_THROTTLE_MS = 5 * 60 * 1000;
-const IDLE_RENEW_THRESHOLD_MS = IDLE_TTL_MS - IDLE_RENEW_THROTTLE_MS;
+import { SESSION_IDLE_TTL_MS, SESSION_IDLE_RENEW_THRESHOLD_MS } from './session-policy.js';
 
 export class PostgresAuthorizationFacade implements AuthorizationFacade {
   private readonly moduleAvailabilityRepo = new ModuleAvailabilityRepository();
@@ -120,14 +117,25 @@ export class PostgresAuthorizationFacade implements AuthorizationFacade {
 
     if (renewIdle) {
       try {
-        // Authorization is not transactional; concurrent renewals are harmless because
-        // the update is throttled and LEAST() preserves the absolute deadline.
-        await this.sessionRepo.renewIdle(
-          this.pool,
-          hashCredential(input.credential!.value),
-          IDLE_TTL_MS,
-          IDLE_RENEW_THRESHOLD_MS,
-        );
+        // Проверяем по уже полученным данным сессии, приблизилось ли время к порогу обновления,
+        // чтобы не делать холостой UPDATE на каждый горячий запрос авторизации.
+        const idleExpiresAtMs = Date.parse(authRes.value.session.idle_expires_at);
+        const expiresAtMs = Date.parse(authRes.value.session.expires_at);
+        const shouldRenew = !Number.isNaN(idleExpiresAtMs)
+          && !Number.isNaN(expiresAtMs)
+          && idleExpiresAtMs < expiresAtMs
+          && idleExpiresAtMs < Date.now() + SESSION_IDLE_RENEW_THRESHOLD_MS;
+
+        if (shouldRenew) {
+          // Authorization is not transactional; concurrent renewals are harmless because
+          // the update is throttled and LEAST() preserves the absolute deadline.
+          await this.sessionRepo.renewIdle(
+            this.pool,
+            hashCredential(input.credential!.value),
+            SESSION_IDLE_TTL_MS,
+            SESSION_IDLE_RENEW_THRESHOLD_MS,
+          );
+        }
       } catch {
         // A renewal failure must not turn an already successful authorization into denial.
       }

@@ -93,7 +93,7 @@ export interface LdapDirectoryConfig {
 
 export const DEFAULT_DIRECTORY_TIMEOUT_MS = 5000;
 
-const MAX_UPN_LENGTH = 256;
+export const MAX_UPN_LENGTH = 255;
 const UPN_ATTRIBUTE = 'userPrincipalName';
 const GUID_ATTRIBUTE = 'objectGUID';
 const DISPLAY_NAME_ATTRIBUTE = 'displayName';
@@ -290,7 +290,7 @@ export class LdapDirectoryAdapter implements DirectoryAuthenticator, DirectoryId
       await withDeadline('bind', this.timeoutMs, () => client!.bind(entryDn, password));
       return ok(identity);
     } catch (error) {
-      return fail(this.mapError(error, { genericAuthFailure: true }));
+      return fail(this.mapError(error, { context: 'user-auth' }));
     } finally {
       await this.closeQuietly(client);
     }
@@ -354,8 +354,8 @@ export class LdapDirectoryAdapter implements DirectoryAuthenticator, DirectoryId
       }
 
       const directoryUpn = readSingleString(entry[UPN_ATTRIBUTE])?.trim();
-      if (!directoryUpn) {
-        return fail(unavailable('Каталог вернул запись без userPrincipalName'));
+      if (!directoryUpn || !isAcceptableUpn(directoryUpn)) {
+        return fail(unavailable('Каталог вернул запись с некорректным userPrincipalName'));
       }
 
       const displayName = readSingleString(entry[DISPLAY_NAME_ATTRIBUTE])?.trim()
@@ -372,7 +372,7 @@ export class LdapDirectoryAdapter implements DirectoryAuthenticator, DirectoryId
         entryDn,
       });
     } catch (error) {
-      return fail(this.mapError(error, { genericAuthFailure: false }));
+      return fail(this.mapError(error, { context: 'service-operation' }));
     } finally {
       await this.closeQuietly(client);
     }
@@ -420,7 +420,7 @@ export class LdapDirectoryAdapter implements DirectoryAuthenticator, DirectoryId
    * Исходное сообщение каталога наружу не передается: оно может содержать DN,
    * внутренние имена хостов и детали конфигурации.
    */
-  private mapError(error: unknown, options: { genericAuthFailure: boolean }): AppError {
+  private mapError(error: unknown, options: { context: 'user-auth' | 'service-operation' }): AppError {
     if (error instanceof DirectoryTimeoutError) {
       return { code: 'TIMEOUT', message: 'Служба каталога не ответила за отведенное время', retryable: true };
     }
@@ -429,9 +429,16 @@ export class LdapDirectoryAdapter implements DirectoryAuthenticator, DirectoryId
     const code = (error as { code?: unknown } | null)?.code;
 
     if (name === 'InvalidCredentialsError' || code === 49) {
-      return options.genericAuthFailure
-        ? { code: 'UNAUTHENTICATED', message: GENERIC_AUTH_FAILURE, retryable: false }
-        : { code: 'UNAUTHENTICATED', message: 'Служба каталога отклонила учетные данные', retryable: false };
+      if (options.context === 'user-auth') {
+        return { code: 'UNAUTHENTICATED', message: GENERIC_AUTH_FAILURE, retryable: false };
+      }
+      // Ошибка аутентификации сервисной учетной записи - это отказ инфраструктуры/конфигурации,
+      // а не ошибка учетных данных пользователя приложения.
+      return {
+        code: 'DEPENDENCY_UNAVAILABLE',
+        message: 'Служба каталога отклонила учетные данные сервисного доступа',
+        retryable: true,
+      };
     }
 
     return unavailable('Служба каталога недоступна');

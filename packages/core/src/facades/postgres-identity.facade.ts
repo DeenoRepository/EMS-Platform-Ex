@@ -23,6 +23,7 @@ import { SessionRepository } from '../persistence/session.repository.js';
 import { AuditRepository } from '../persistence/audit.repository.js';
 import { hashCredential } from './subject-auth.js';
 import { dependencyFailure, normalizeDependencyResult, isNonEmptyString } from './errors.js';
+import { SESSION_ABSOLUTE_TTL_MS, SESSION_IDLE_TTL_MS } from './session-policy.js';
 
 export const ADMIN_ROLE_ID = 'role.platform.admin';
 
@@ -117,10 +118,10 @@ export class PostgresIdentityFacade implements IdentityFacade {
         const credentialHash = hashCredential(credentialValue);
         const sessionId = crypto.randomUUID();
 
-        // Сроки сессии: 8 часов абсолютный, 30 минут бездействия (утвержденный baseline)
+        // Сроки сессии из централизованной политики (8 часов абсолютный, 30 минут бездействия)
         const now = new Date();
-        const expiresAt = new Date(now.getTime() + 8 * 60 * 60 * 1000);
-        const idleExpiresAt = new Date(now.getTime() + 30 * 60 * 1000);
+        const expiresAt = new Date(now.getTime() + SESSION_ABSOLUTE_TTL_MS);
+        const idleExpiresAt = new Date(now.getTime() + SESSION_IDLE_TTL_MS);
 
         await this.sessionRepo.create(client, {
           id: sessionId,
