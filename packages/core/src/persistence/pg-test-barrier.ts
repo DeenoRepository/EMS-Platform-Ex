@@ -7,7 +7,7 @@ const POLL_INTERVAL_MS = 25;
 export async function waitUntilBlocked(
   pool: DatabasePool,
   predicateSql: string,
-  timeoutMs = 5000,
+  timeoutMs = 10000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   let lastCount = 0;

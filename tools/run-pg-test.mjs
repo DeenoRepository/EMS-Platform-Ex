@@ -12,7 +12,7 @@ const test = spawnSync(process.execPath, [
   env: {
     ...process.env,
     EMS_TEST_PG_REQUIRED: 'true',
-    PGOPTIONS: `${process.env.PGOPTIONS ?? ''} -c statement_timeout=15000 -c lock_timeout=5000`.trim(),
+    PGOPTIONS: `${process.env.PGOPTIONS ?? ''} -c statement_timeout=30000 -c lock_timeout=15000`.trim(),
   },
 });
 

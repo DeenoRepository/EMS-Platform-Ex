@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { SchemaMigrator } from './migrator.js';
 import { DatabasePool } from './db.js';
 import { AuditRepository } from './audit.repository.js';
+import { waitUntilBlocked } from './pg-test-barrier.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -81,13 +82,18 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
       const resReapply = await migrationPool.query('SELECT version FROM ems_core.schema_migrations');
       assert.equal(resReapply.rows.length, 2);
     } finally {
+      await migrator.teardownEphemeralSchema();
       await migrationPool.close();
     }
   });
 
   test('upgrade сохраняет completed и не возвращает bootstrap_state в ready', async () => {
-    const { migrationPool, runtimePool, migrator } = await cleanDatabase();
+    const migrationPool = new DatabasePool({ connectionString: migrationUrl });
+    const runtimePool = new DatabasePool({ connectionString: runtimeUrl });
+    const migrator = new SchemaMigrator(migrationPool);
     try {
+      await migrator.teardownEphemeralSchema();
+      await migrator.applyMigration({ id: '001_core_schema', upSql: up001, downSql: down001 });
       await runtimePool.query(`
         INSERT INTO ems_core.departments (id, name, code) VALUES ('dept-upgrade', 'Upgrade', 'UPGRADE');
         INSERT INTO ems_core.roles (id, name, is_system) VALUES ('role.platform.admin', 'Admin', true);
@@ -95,13 +101,12 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
         INSERT INTO ems_core.employees (id, directory_id, object_guid, upn, display_name, status, department_id)
         VALUES ('emp-upgrade', 'corp.local', 'guid-upgrade', 'upgrade@corp.local', 'Upgrade', 'ACTIVE', 'dept-upgrade');
         INSERT INTO ems_core.employee_roles (employee_id, role_id) VALUES ('emp-upgrade', 'role.platform.admin');
-        UPDATE ems_core.bootstrap_state SET status = 'completed' WHERE id = 1;
       `);
-      await migrator.applyMigration({ id: '001_core_schema', upSql: up001, downSql: down001 });
       await migrator.applyMigration({ id: '002_core_security_remediation', upSql: up002, downSql: down002 });
       const state = await runtimePool.query<{ status: string }>('SELECT status FROM ems_core.bootstrap_state WHERE id = 1');
       assert.equal(state.rows[0]?.status, 'completed');
     } finally {
+      await new SchemaMigrator(migrationPool).teardownEphemeralSchema().catch(() => undefined);
       await runtimePool.close();
       await migrationPool.close();
     }
@@ -137,7 +142,7 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
       const repeat = await runtimePool.query<{ count: string }>("SELECT COUNT(*)::text AS count FROM ems_core.schema_migrations WHERE version = '002_core_security_remediation'");
       assert.equal(repeat.rows[0]?.count, '1');
     } finally {
-      await migrator.teardownEphemeralSchema();
+      await new SchemaMigrator(migrationPool).teardownEphemeralSchema();
       await runtimePool.close();
       await migrationPool.close();
     }
@@ -157,6 +162,7 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
       const after = await runtimePool.query<{ status: string }>('SELECT status FROM ems_core.bootstrap_state WHERE id = 1');
       assert.equal(after.rows[0]?.status, 'locked-legacy');
     } finally {
+      await migrator.teardownEphemeralSchema();
       await runtimePool.close();
       await migrationPool.close();
     }
@@ -261,6 +267,7 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
       assert.deepEqual(pages, ['audit-5', 'audit-4', 'audit-3', 'audit-2', 'audit-1']);
       assert.equal(new Set(pages).size, 5);
     } finally {
+      await new SchemaMigrator(migrationPool).teardownEphemeralSchema();
       await runtimePool.close();
       await migrationPool.close();
     }
@@ -288,6 +295,25 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
       assert.deepEqual(pages, ['micro-d', 'micro-c', 'micro-b', 'micro-a']);
       assert.equal(new Set(pages).size, 4);
     } finally {
+      await new SchemaMigrator(migrationPool).teardownEphemeralSchema().catch(() => undefined);
+      await runtimePool.close();
+      await migrationPool.close();
+    }
+  });
+
+  test('waitUntilBlocked завершается контролируемой ошибкой по timeout', async () => {
+    const runtimePool = new DatabasePool({ connectionString: runtimeUrl });
+    const migrationPool = new DatabasePool({ connectionString: migrationUrl });
+    try {
+      const startedAt = Date.now();
+      await assert.rejects(
+        () => waitUntilBlocked(runtimePool, 'SELECT 0::text AS count', 150),
+        /Ожидание блокировки PostgreSQL истекло/,
+      );
+      assert.ok(Date.now() - startedAt >= 150);
+      assert.ok(Date.now() - startedAt < 2000);
+    } finally {
+      await new SchemaMigrator(migrationPool).teardownEphemeralSchema().catch(() => undefined);
       await runtimePool.close();
       await migrationPool.close();
     }
@@ -296,8 +322,12 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
   test('Реальная конкурентность двух соединений PostgreSQL (two logins on same identity)', async () => {
     const pool1 = new DatabasePool({ connectionString: runtimeUrl });
     const pool2 = new DatabasePool({ connectionString: runtimeUrl });
+    const migrationPool = new DatabasePool({ connectionString: migrationUrl });
+    const migrator = new SchemaMigrator(migrationPool);
 
     try {
+      await migrator.teardownEphemeralSchema();
+      await migrator.provisionClean(loadMigrations());
       const client1 = await pool1.rawPool.connect();
       const client2 = await pool2.rawPool.connect();
 
@@ -331,8 +361,10 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
         client2.release();
       }
     } finally {
+      await migrator.teardownEphemeralSchema().catch(() => undefined);
       await pool1.close();
       await pool2.close();
+      await migrationPool.close();
     }
   });
 });

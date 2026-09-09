@@ -9,7 +9,7 @@ import { ADMIN_ROLE_ID, PostgresIdentityFacade } from './postgres-identity.facad
 import { PostgresAuthorizationFacade } from './postgres-authorization.facade.js';
 import { PostgresAuditFacade } from './postgres-audit.facade.js';
 import { ok, type DirectoryAuthenticator, type DirectoryIdentityResolver, type LocalOperatorPort } from '@ems/contracts';
-import { blockedRowPredicate, withDecoyLock, waitUntilBlocked } from '../persistence/pg-test-barrier.js';
+import { blockedByPredicate, blockedRowPredicate, withDecoyLock, waitUntilBlocked } from '../persistence/pg-test-barrier.js';
 import { hashCredential } from './subject-auth.js';
 
 const isOptIn = process.env.EMS_TEST_PG_INTEGRATION === 'true';
@@ -267,24 +267,34 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     const sessionB = await login(adminB);
     const rowA = await employee(sessionA.session.employeeId);
     const rowB = await employee(sessionB.session.employeeId);
-    const results = await Promise.all([
-      administration.assignEmployee({
-        actorCredential: sessionA.credential,
-        employeeId: sessionB.session.employeeId,
-        departmentId: 'dept-mutual-a',
-        roleIds: [],
-        expectedVersion: rowB!.version,
-      }),
-      administration.assignEmployee({
-        actorCredential: sessionB.credential,
-        employeeId: sessionA.session.employeeId,
-        departmentId: 'dept-mutual-a',
-        roleIds: [],
-        expectedVersion: rowA!.version,
-      }),
-    ]);
+    const results = await withDecoyLock(
+      runtimePool,
+      'SELECT id FROM ems_core.bootstrap_state WHERE id = 1 FOR UPDATE',
+      [],
+      async (release, blockerPid) => {
+        const operations = Promise.all([
+          administration.assignEmployee({
+            actorCredential: sessionA.credential,
+            employeeId: sessionB.session.employeeId,
+            departmentId: 'dept-mutual-a',
+            roleIds: [],
+            expectedVersion: rowB!.version,
+          }),
+          administration.assignEmployee({
+            actorCredential: sessionB.credential,
+            employeeId: sessionA.session.employeeId,
+            departmentId: 'dept-mutual-a',
+            roleIds: [],
+            expectedVersion: rowA!.version,
+          }),
+        ]);
+        await waitUntilBlocked(runtimePool, blockedByPredicate(blockerPid));
+        await release();
+        return operations;
+      },
+    );
     assert.equal(results.filter((result) => result.ok).length, 1);
-    assert.ok(results.some((result) => !result.ok && ['UNAUTHENTICATED', 'CONFLICT'].includes(result.error.code)));
+    assert.equal(results.filter((result) => !result.ok && result.error.code === 'UNAUTHENTICATED').length, 1);
 
     const admins = await runtimePool.query<{ employee_id: string }>(
       `SELECT e.id AS employee_id
@@ -295,6 +305,7 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     );
     assert.equal(admins.rows.length, 1);
     const survivorId = admins.rows[0]!.employee_id;
+    assert.ok([sessionA.session.employeeId, sessionB.session.employeeId].includes(survivorId));
     const revoked = await runtimePool.query<{ revoked_at: string | null }>(
       'SELECT revoked_at::text FROM ems_core.sessions WHERE employee_id = $1 AND revoked_at IS NOT NULL',
       [survivorId === sessionA.session.employeeId ? sessionB.session.employeeId : sessionA.session.employeeId],
