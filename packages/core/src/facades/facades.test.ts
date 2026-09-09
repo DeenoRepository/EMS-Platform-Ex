@@ -692,6 +692,33 @@ describe('Postgres Core Facades unit tests (in-memory simulator)', () => {
     assert.equal(target.version, beforeVersion);
   });
 
+  test('заблокированный вход сохраняет LOGIN_BLOCKED аудит', async () => {
+    const mockDb = new MockDatabasePool() as any;
+    const identityFacade = new PostgresIdentityFacade(mockDb, fakeLdap, fakeLdap, defaultOperatorPort);
+    const logged = await identityFacade.login({ upn: 'blocked-login@corp.local', password: 'password' });
+    assert.equal(logged.ok, true);
+    if (!logged.ok) return;
+    const target = mockDb.employees.get(logged.value.session.employeeId);
+    target.status = 'BLOCKED';
+    const result = await identityFacade.login({ upn: 'blocked-login@corp.local', password: 'password' });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, 'FORBIDDEN');
+    assert.equal(mockDb.auditLog.filter((record: any) => record.action === 'LOGIN_BLOCKED').length, 1);
+  });
+
+  test('отказ аудита заблокированного входа возвращает AUDIT_FAILED', async () => {
+    const mockDb = new MockDatabasePool() as any;
+    const identityFacade = new PostgresIdentityFacade(mockDb, fakeLdap, fakeLdap, defaultOperatorPort);
+    const logged = await identityFacade.login({ upn: 'blocked-login-audit@corp.local', password: 'password' });
+    assert.equal(logged.ok, true);
+    if (!logged.ok) return;
+    mockDb.employees.get(logged.value.session.employeeId).status = 'BLOCKED';
+    mockDb.failNextAuditInsert = true;
+    const result = await identityFacade.login({ upn: 'blocked-login-audit@corp.local', password: 'password' });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, 'AUDIT_FAILED');
+  });
+
   test('выход из системы отзывает сессию (SessionFacade, FR-028)', async () => {
     const mockDb = new MockDatabasePool() as any;
     const identityFacade = new PostgresIdentityFacade(mockDb, fakeLdap, fakeLdap, defaultOperatorPort);

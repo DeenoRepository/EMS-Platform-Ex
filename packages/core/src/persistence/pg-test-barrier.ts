@@ -26,9 +26,11 @@ export async function withDecoyLock<T>(
   pool: DatabasePool,
   sql: string,
   params: readonly unknown[],
-  operation: (release: () => Promise<void>) => Promise<T>,
+  operation: (release: () => Promise<void>, blockerPid: number) => Promise<T>,
 ): Promise<T> {
   const client = await pool.rawPool.connect();
+  const pidResult = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+  const blockerPid = pidResult.rows[0]!.pid;
   let committed = false;
   const release = async () => {
     if (!committed) {
@@ -39,7 +41,7 @@ export async function withDecoyLock<T>(
   try {
     await client.query('BEGIN');
     await client.query(sql, [...params]);
-    const result = await operation(release);
+    const result = await operation(release, blockerPid);
     await release();
     return result;
   } finally {
@@ -50,20 +52,17 @@ export async function withDecoyLock<T>(
   }
 }
 
-export function blockedRowPredicate(relation: string): string {
+export function blockedRowPredicate(relation: string, blockerPid: number): string {
   const escapedRelation = relation.replaceAll("'", "''");
-  const escapedQueryFragment = relation.replaceAll("'", "''");
   return `
-    SELECT COUNT(*)::text AS count
+    SELECT COUNT(DISTINCT activity.pid)::text AS count
     FROM pg_locks waiting
     JOIN pg_stat_activity activity ON activity.pid = waiting.pid
     WHERE NOT waiting.granted
       AND activity.pid <> pg_backend_pid()
       AND activity.wait_event_type = 'Lock'
-      AND (
-        waiting.relation = '${escapedRelation}'::regclass
-        OR activity.query LIKE '%${escapedQueryFragment}%'
-      )
+      AND ${Number.isInteger(blockerPid) ? blockerPid : 0} = ANY(pg_blocking_pids(activity.pid))
+      AND (waiting.relation = '${escapedRelation}'::regclass OR waiting.locktype = 'transactionid')
   `;
 }
 

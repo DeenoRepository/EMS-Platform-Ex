@@ -113,9 +113,9 @@ describe('PostgreSQL facade concurrency acceptance', () => {
       runtimePool,
       'SELECT id FROM ems_core.employees WHERE id = $1 FOR UPDATE',
       [targetId],
-      async (release) => {
+      async (release, blockerPid) => {
         const loginPromise = login(targetUpn);
-        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees'));
+        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
         const assignPromise = administration.assignEmployee({
           actorCredential: adminSession.credential,
           employeeId: targetId,
@@ -123,7 +123,7 @@ describe('PostgreSQL facade concurrency acceptance', () => {
           roleIds: [],
           expectedVersion: 1,
         });
-        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees'));
+        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
         await release();
         return Promise.all([loginPromise, assignPromise]);
       },
@@ -153,7 +153,7 @@ describe('PostgreSQL facade concurrency acceptance', () => {
       runtimePool,
       'SELECT id FROM ems_core.employees WHERE id = $1 FOR UPDATE',
       [targetLogin.session.employeeId],
-      async (release) => {
+      async (release, blockerPid) => {
         const assignPromise = administration.assignEmployee({
           actorCredential: adminSession.credential,
           employeeId: targetLogin.session.employeeId,
@@ -161,9 +161,9 @@ describe('PostgreSQL facade concurrency acceptance', () => {
           roleIds: [],
           expectedVersion: 1,
         });
-        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees'));
+        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
         const loginPromise = login(targetUpn);
-        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees'));
+        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
         await release();
         return Promise.all([assignPromise, loginPromise]);
       },

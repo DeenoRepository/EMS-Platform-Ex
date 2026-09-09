@@ -166,7 +166,15 @@ export class PostgresIdentityFacade implements IdentityFacade {
     } catch (err) {
       if (err instanceof TransactionAbortError) {
         if (err instanceof BlockedLoginError) {
-          await this.recordBlockedLoginAudit(ldapUser).catch(() => undefined);
+          try {
+            await this.recordBlockedLoginAudit(ldapUser);
+          } catch {
+            return fail({
+              code: 'AUDIT_FAILED',
+              message: 'Не удалось записать аудит заблокированного входа',
+              retryable: true,
+            });
+          }
         }
         return fail(err.appError);
       }
