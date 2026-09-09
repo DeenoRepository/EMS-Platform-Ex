@@ -113,16 +113,16 @@ describe('PostgreSQL facade concurrency acceptance', () => {
       runtimePool,
       'SELECT id FROM ems_core.employees WHERE id = $1 FOR UPDATE',
       [targetId],
-      async (release, blockerPid) => {
-        const loginPromise = login(targetUpn);
+      async (release, blockerPid, track) => {
+        const loginPromise = track(login(targetUpn));
         await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
-        const assignPromise = administration.assignEmployee({
+        const assignPromise = track(administration.assignEmployee({
           actorCredential: adminSession.credential,
           employeeId: targetId,
           departmentId: 'dept-admin',
           roleIds: [],
           expectedVersion: 1,
-        });
+        }));
         await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid), 10000, 2);
         await release();
         return Promise.all([loginPromise, assignPromise]);
@@ -153,16 +153,16 @@ describe('PostgreSQL facade concurrency acceptance', () => {
       runtimePool,
       'SELECT id FROM ems_core.employees WHERE id = $1 FOR UPDATE',
       [targetLogin.session.employeeId],
-      async (release, blockerPid) => {
-        const assignPromise = administration.assignEmployee({
+      async (release, blockerPid, track) => {
+        const assignPromise = track(administration.assignEmployee({
           actorCredential: adminSession.credential,
           employeeId: targetLogin.session.employeeId,
           departmentId: 'dept-new',
           roleIds: [],
           expectedVersion: 1,
-        });
+        }));
         await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
-        const loginPromise = login(targetUpn);
+        const loginPromise = track(login(targetUpn));
         await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid), 10000, 2);
         await release();
         return Promise.all([assignPromise, loginPromise]);
@@ -174,10 +174,22 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     assert.deepEqual(fresh.session.roleIds, []);
   });
 
-  test('login -> bootstrap: bootstrap активирует существующую PENDING-личность и отзывает сессию', async () => {
+  test('login -> bootstrap: обе операции достигают row-lock и bootstrap отзывает созданную сессию', async () => {
     const upn = unique('same-identity');
-    const logged = await login(upn);
-    const boot = await bootstrap(upn, 'dept-bootstrap');
+    const initial = await login(upn);
+    const [logged, boot] = await withDecoyLock(
+      runtimePool,
+      'SELECT id FROM ems_core.employees WHERE id = $1 FOR UPDATE',
+      [initial.session.employeeId],
+      async (release, blockerPid, track) => {
+        const loginPromise = track(login(upn));
+        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
+        const bootstrapPromise = track(bootstrap(upn, 'dept-bootstrap'));
+        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid), 10000, 2);
+        await release();
+        return Promise.all([loginPromise, bootstrapPromise]);
+      },
+    );
     assert.equal(boot.employeeId, logged.session.employeeId);
     const row = await employee(boot.employeeId);
     assert.equal(row?.status, 'ACTIVE');
@@ -187,10 +199,23 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     assert.equal(sessions.rows[0]?.reason, 'BOOTSTRAP_COMPLETED');
   });
 
-  test('bootstrap -> login: login получает ACTIVE-администратора', async () => {
+  test('bootstrap -> login: login ожидает bootstrap и получает ACTIVE-администратора', async () => {
     const upn = unique('bootstrap-first');
-    await bootstrap(upn, 'dept-bootstrap');
-    const logged = await login(upn);
+    const initial = await login(upn);
+    const [boot, logged] = await withDecoyLock(
+      runtimePool,
+      'SELECT id FROM ems_core.employees WHERE id = $1 FOR UPDATE',
+      [initial.session.employeeId],
+      async (release, blockerPid, track) => {
+        const bootstrapPromise = track(bootstrap(upn, 'dept-bootstrap'));
+        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
+        const loginPromise = track(login(upn));
+        await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid), 10000, 2);
+        await release();
+        return Promise.all([bootstrapPromise, loginPromise]);
+      },
+    );
+    assert.equal(boot.employeeId, logged.session.employeeId);
     assert.equal(logged.session.isPending, false);
     assert.equal(logged.session.departmentId, 'dept-bootstrap');
     assert.deepEqual(logged.session.roleIds, [ADMIN_ROLE_ID]);
@@ -267,26 +292,29 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     const sessionB = await login(adminB);
     const rowA = await employee(sessionA.session.employeeId);
     const rowB = await employee(sessionB.session.employeeId);
+    const assignmentAuditBefore = await runtimePool.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM ems_core.audit_log WHERE action = 'ASSIGN_EMPLOYEE'",
+    );
     const results = await withDecoyLock(
       runtimePool,
       'SELECT id FROM ems_core.bootstrap_state WHERE id = 1 FOR UPDATE',
       [],
-      async (release, blockerPid) => {
-        const first = administration.assignEmployee({
+      async (release, blockerPid, track) => {
+        const first = track(administration.assignEmployee({
           actorCredential: sessionA.credential,
           employeeId: sessionB.session.employeeId,
           departmentId: 'dept-mutual-a',
           roleIds: [],
           expectedVersion: rowB!.version,
-        });
+        }));
         await waitUntilBlocked(runtimePool, blockedByPredicate(blockerPid));
-        const second = administration.assignEmployee({
+        const second = track(administration.assignEmployee({
           actorCredential: sessionB.credential,
           employeeId: sessionA.session.employeeId,
           departmentId: 'dept-mutual-a',
           roleIds: [],
           expectedVersion: rowA!.version,
-        });
+        }));
         const operations = Promise.all([first, second]);
         await waitUntilBlocked(runtimePool, blockedByPredicate(blockerPid), 10000, 2);
         await release();
@@ -306,11 +334,84 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     assert.equal(admins.rows.length, 1);
     const survivorId = admins.rows[0]!.employee_id;
     assert.ok([sessionA.session.employeeId, sessionB.session.employeeId].includes(survivorId));
+    const removedId = survivorId === sessionA.session.employeeId
+      ? sessionB.session.employeeId
+      : sessionA.session.employeeId;
+    const survivorBefore = survivorId === sessionA.session.employeeId ? rowA! : rowB!;
+    const survivorAfter = await employee(survivorId);
+    assert.equal(survivorAfter?.version, survivorBefore.version);
+    assert.equal(survivorAfter?.department_id, survivorBefore.department_id);
     const revoked = await runtimePool.query<{ revoked_at: string | null }>(
       'SELECT revoked_at::text FROM ems_core.sessions WHERE employee_id = $1 AND revoked_at IS NOT NULL',
-      [survivorId === sessionA.session.employeeId ? sessionB.session.employeeId : sessionA.session.employeeId],
+      [removedId],
     );
     assert.ok(revoked.rows.length >= 1);
+    const survivorSession = await runtimePool.query<{ revoked_at: string | null }>(
+      'SELECT revoked_at::text FROM ems_core.sessions WHERE id = $1',
+      [survivorId === sessionA.session.employeeId ? sessionA.session.sessionId : sessionB.session.sessionId],
+    );
+    assert.equal(survivorSession.rows[0]?.revoked_at, null);
+    const assignmentAuditAfter = await runtimePool.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM ems_core.audit_log WHERE action = 'ASSIGN_EMPLOYEE'",
+    );
+    assert.equal(
+      Number(assignmentAuditAfter.rows[0]?.count),
+      Number(assignmentAuditBefore.rows[0]?.count) + 1,
+    );
+  });
+
+  test('обратный порядок взаимного снятия admin-ролей сохраняет одного администратора', async () => {
+    const adminA = unique('reverse-admin-a');
+    const adminB = unique('reverse-admin-b');
+    await bootstrap(adminA, 'dept-reverse-admin');
+    const sessionA = await login(adminA);
+    const pendingB = await login(adminB);
+    const assignedB = await administration.assignEmployee({
+      actorCredential: sessionA.credential,
+      employeeId: pendingB.session.employeeId,
+      departmentId: 'dept-reverse-admin',
+      roleIds: [ADMIN_ROLE_ID],
+      expectedVersion: 1,
+    });
+    assert.equal(assignedB.ok, true);
+    const sessionB = await login(adminB);
+    const rowA = await employee(sessionA.session.employeeId);
+    const rowB = await employee(sessionB.session.employeeId);
+    const results = await withDecoyLock(
+      runtimePool,
+      'SELECT id FROM ems_core.bootstrap_state WHERE id = 1 FOR UPDATE',
+      [],
+      async (release, blockerPid, track) => {
+        const first = track(administration.assignEmployee({
+          actorCredential: sessionB.credential,
+          employeeId: sessionA.session.employeeId,
+          departmentId: 'dept-reverse-admin',
+          roleIds: [],
+          expectedVersion: rowA!.version,
+        }));
+        await waitUntilBlocked(runtimePool, blockedByPredicate(blockerPid));
+        const second = track(administration.assignEmployee({
+          actorCredential: sessionA.credential,
+          employeeId: sessionB.session.employeeId,
+          departmentId: 'dept-reverse-admin',
+          roleIds: [],
+          expectedVersion: rowB!.version,
+        }));
+        await waitUntilBlocked(runtimePool, blockedByPredicate(blockerPid), 10000, 2);
+        await release();
+        return Promise.all([first, second]);
+      },
+    );
+    assert.equal(results.filter((result) => result.ok).length, 1);
+    assert.equal(results.filter((result) => !result.ok && result.error.code === 'UNAUTHENTICATED').length, 1);
+    const admins = await runtimePool.query<{ employee_id: string }>(
+      `SELECT e.id AS employee_id FROM ems_core.employees e
+       JOIN ems_core.employee_roles er ON er.employee_id = e.id
+       WHERE e.status = 'ACTIVE' AND er.role_id = $1`,
+      [ADMIN_ROLE_ID],
+    );
+    assert.equal(admins.rows.length, 1);
+    assert.equal(admins.rows[0]?.employee_id, sessionB.session.employeeId);
   });
 
   test('отказ аудита откатывает login и assignment на PostgreSQL', async () => {
@@ -350,6 +451,70 @@ describe('PostgreSQL facade concurrency acceptance', () => {
         'SELECT revoked_at::text FROM ems_core.sessions WHERE employee_id = $1', [targetSession.session.employeeId],
       );
       assert.equal(sessions.rows.some((row) => row.revoked_at !== null), false);
+    } finally {
+      await migrationPool.query('DROP TRIGGER IF EXISTS reject_audit_insert ON ems_core.audit_log; DROP FUNCTION IF EXISTS ems_core.reject_audit_insert();');
+    }
+  });
+
+  test('отказ аудита откатывает bootstrap и setModuleAvailability на PostgreSQL', async () => {
+    await migrationPool.query(`
+      CREATE OR REPLACE FUNCTION ems_core.reject_audit_insert() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic audit failure'; END; $$;
+      CREATE TRIGGER reject_audit_insert BEFORE INSERT ON ems_core.audit_log
+      FOR EACH ROW EXECUTE FUNCTION ems_core.reject_audit_insert();
+    `);
+    try {
+      const bootstrapUpn = unique('fault-bootstrap');
+      const bootstrapResult = await identity.bootstrap({ upn: bootstrapUpn, initialDepartmentId: 'dept-fault-bootstrap' });
+      assert.equal(bootstrapResult.ok, false);
+      const bootstrapState = await runtimePool.query<{ status: string }>(
+        'SELECT status FROM ems_core.bootstrap_state WHERE id = 1',
+      );
+      const bootstrapEmployee = await runtimePool.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM ems_core.employees WHERE upn = $1',
+        [bootstrapUpn],
+      );
+      const bootstrapDepartment = await runtimePool.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM ems_core.departments WHERE id = 'dept-fault-bootstrap'",
+      );
+      const bootstrapRole = await runtimePool.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM ems_core.roles WHERE id = $1',
+        [ADMIN_ROLE_ID],
+      );
+      const bootstrapPermissions = await runtimePool.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM ems_core.role_permissions WHERE role_id = $1',
+        [ADMIN_ROLE_ID],
+      );
+      const bootstrapSessions = await runtimePool.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM ems_core.sessions',
+      );
+      assert.equal(bootstrapState.rows[0]?.status, 'ready');
+      assert.equal(bootstrapEmployee.rows[0]?.count, '0');
+      assert.equal(bootstrapDepartment.rows[0]?.count, '0');
+      assert.equal(bootstrapRole.rows[0]?.count, '0');
+      assert.equal(bootstrapPermissions.rows[0]?.count, '0');
+      assert.equal(bootstrapSessions.rows[0]?.count, '0');
+    } finally {
+      await migrationPool.query('DROP TRIGGER IF EXISTS reject_audit_insert ON ems_core.audit_log;');
+    }
+
+    const adminUpn = unique('fault-module-admin');
+    await bootstrap(adminUpn, 'dept-fault-module');
+    const adminSession = await login(adminUpn);
+    await migrationPool.query('CREATE TRIGGER reject_audit_insert BEFORE INSERT ON ems_core.audit_log FOR EACH ROW EXECUTE FUNCTION ems_core.reject_audit_insert();');
+    try {
+      const availability = await administration.setModuleAvailability({
+        actorCredential: adminSession.credential,
+        moduleId: 'fault-module',
+        departmentId: 'dept-fault-module',
+        enabled: true,
+        expectedVersion: 0,
+      });
+      assert.equal(availability.ok, false);
+      const rows = await runtimePool.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM ems_core.module_availability WHERE module_id = 'fault-module'",
+      );
+      assert.equal(rows.rows[0]?.count, '0');
     } finally {
       await migrationPool.query('DROP TRIGGER IF EXISTS reject_audit_insert ON ems_core.audit_log; DROP FUNCTION IF EXISTS ems_core.reject_audit_insert();');
     }
@@ -431,6 +596,147 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     if (!result.ok) assert.equal(result.error.code, 'FORBIDDEN');
   });
 
+  test('BLOCKED сотрудник не реактивируется и не получает побочных эффектов назначения', async () => {
+    const adminUpn = unique('blocked-guard-admin');
+    const targetUpn = unique('blocked-guard-target');
+    await bootstrap(adminUpn, 'dept-blocked-guard');
+    const adminSession = await login(adminUpn);
+    const targetSession = await login(targetUpn);
+    await runtimePool.query(
+      "UPDATE ems_core.employees SET status = 'BLOCKED' WHERE id = $1",
+      [targetSession.session.employeeId],
+    );
+    const before = await employee(targetSession.session.employeeId);
+    const auditBefore = await runtimePool.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM ems_core.audit_log WHERE action = 'ASSIGN_EMPLOYEE' AND object_id = $1",
+      [targetSession.session.employeeId],
+    );
+    const result = await administration.assignEmployee({
+      actorCredential: adminSession.credential,
+      employeeId: targetSession.session.employeeId,
+      departmentId: 'dept-blocked-guard',
+      roleIds: [],
+      expectedVersion: before!.version,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, 'FORBIDDEN');
+    const after = await employee(targetSession.session.employeeId);
+    const session = await runtimePool.query<{ revoked_at: string | null }>(
+      'SELECT revoked_at::text FROM ems_core.sessions WHERE id = $1',
+      [targetSession.session.sessionId],
+    );
+    const auditAfter = await runtimePool.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM ems_core.audit_log WHERE action = 'ASSIGN_EMPLOYEE' AND object_id = $1",
+      [targetSession.session.employeeId],
+    );
+    assert.equal(after?.status, 'BLOCKED');
+    assert.equal(after?.version, before?.version);
+    assert.equal(after?.department_id, before?.department_id);
+    assert.equal(session.rows[0]?.revoked_at, null);
+    assert.equal(auditAfter.rows[0]?.count, auditBefore.rows[0]?.count);
+  });
+
+  test('оператор только с employees.manage не реактивирует BLOCKED администратора с неизменной ролью', async () => {
+    const firstAdminUpn = unique('blocked-admin-owner');
+    const blockedAdminUpn = unique('blocked-admin-target');
+    const managerUpn = unique('blocked-admin-manager');
+    await bootstrap(firstAdminUpn, 'dept-blocked-admin');
+    const firstAdminSession = await login(firstAdminUpn);
+    const blockedPending = await login(blockedAdminUpn);
+    const blockedAssigned = await administration.assignEmployee({
+      actorCredential: firstAdminSession.credential,
+      employeeId: blockedPending.session.employeeId,
+      departmentId: 'dept-blocked-admin',
+      roleIds: [ADMIN_ROLE_ID],
+      expectedVersion: 1,
+    });
+    assert.equal(blockedAssigned.ok, true);
+    const managerPending = await login(managerUpn);
+    await runtimePool.query(
+      `INSERT INTO ems_core.roles (id, name, is_system)
+       VALUES ('role.employee.manager.r1', 'R1 employee manager', false)`,
+    );
+    await runtimePool.query(
+      `INSERT INTO ems_core.role_permissions (role_id, permission_id)
+       VALUES ('role.employee.manager.r1', 'employees.manage')`,
+    );
+    await runtimePool.query(
+      `UPDATE ems_core.employees
+       SET status = 'ACTIVE', department_id = 'dept-blocked-admin', version = version + 1
+       WHERE id = $1`,
+      [managerPending.session.employeeId],
+    );
+    await runtimePool.query(
+      `INSERT INTO ems_core.employee_roles (employee_id, role_id)
+       VALUES ($1, 'role.employee.manager.r1')`,
+      [managerPending.session.employeeId],
+    );
+    const managerSession = await login(managerUpn);
+    await runtimePool.query(
+      "UPDATE ems_core.employees SET status = 'BLOCKED' WHERE id = $1",
+      [blockedPending.session.employeeId],
+    );
+    const before = await employee(blockedPending.session.employeeId);
+    const rolesBefore = await runtimePool.query<{ role_id: string }>(
+      'SELECT role_id FROM ems_core.employee_roles WHERE employee_id = $1 ORDER BY role_id',
+      [blockedPending.session.employeeId],
+    );
+    const result = await administration.assignEmployee({
+      actorCredential: managerSession.credential,
+      employeeId: blockedPending.session.employeeId,
+      departmentId: 'dept-blocked-admin',
+      roleIds: [ADMIN_ROLE_ID],
+      expectedVersion: before!.version,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, 'FORBIDDEN');
+    const after = await employee(blockedPending.session.employeeId);
+    const rolesAfter = await runtimePool.query<{ role_id: string }>(
+      'SELECT role_id FROM ems_core.employee_roles WHERE employee_id = $1 ORDER BY role_id',
+      [blockedPending.session.employeeId],
+    );
+    assert.equal(after?.status, 'BLOCKED');
+    assert.equal(after?.version, before?.version);
+    assert.deepEqual(rolesAfter.rows, rolesBefore.rows);
+  });
+
+  test('заблокированный login сохраняет аудит без сессии, а отказ аудита возвращает AUDIT_FAILED', async () => {
+    const upn = unique('blocked-login-pg');
+    const first = await login(upn);
+    await runtimePool.query("UPDATE ems_core.employees SET status = 'BLOCKED' WHERE id = $1", [first.session.employeeId]);
+    const sessionsBefore = await runtimePool.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM ems_core.sessions WHERE employee_id = $1',
+      [first.session.employeeId],
+    );
+    const blocked = await identity.login({ upn, password: 'synthetic-password' });
+    assert.equal(blocked.ok, false);
+    if (!blocked.ok) assert.equal(blocked.error.code, 'FORBIDDEN');
+    const auditCount = await runtimePool.query<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM ems_core.audit_log WHERE action = 'LOGIN_BLOCKED' AND object_id = $1",
+      [first.session.employeeId],
+    );
+    const sessionsAfter = await runtimePool.query<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM ems_core.sessions WHERE employee_id = $1',
+      [first.session.employeeId],
+    );
+    assert.equal(auditCount.rows[0]?.count, '1');
+    assert.equal(sessionsAfter.rows[0]?.count, sessionsBefore.rows[0]?.count);
+
+    await migrationPool.query(`
+      CREATE OR REPLACE FUNCTION ems_core.reject_audit_insert() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic audit failure'; END; $$;
+      CREATE TRIGGER reject_audit_insert BEFORE INSERT ON ems_core.audit_log
+      FOR EACH ROW EXECUTE FUNCTION ems_core.reject_audit_insert();
+    `);
+    try {
+      const failedAudit = await identity.login({ upn, password: 'synthetic-password' });
+      assert.equal(failedAudit.ok, false);
+      if (!failedAudit.ok) assert.equal(failedAudit.error.code, 'AUDIT_FAILED');
+    } finally {
+      await migrationPool.query('DROP TRIGGER IF EXISTS reject_audit_insert ON ems_core.audit_log; DROP FUNCTION IF EXISTS ems_core.reject_audit_insert();');
+    }
+  });
+
   test('успешная авторизация продлевает idle TTL, но не за absolute TTL', async () => {
     const upn = unique('idle-admin');
     await bootstrap(upn, 'dept-idle');
@@ -453,5 +759,109 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     );
     assert.ok(new Date(row.rows[0]!.idle_expires_at) > idleBefore);
     assert.ok(new Date(row.rows[0]!.idle_expires_at) <= new Date(row.rows[0]!.expires_at));
+  });
+
+  test('background/denied authorize не продлевают idle TTL, absolute deadline не обновляется', async () => {
+    const upn = unique('idle-background-admin');
+    await bootstrap(upn, 'dept-idle-background');
+    const session = await login(upn);
+    const authorization = new PostgresAuthorizationFacade(runtimePool);
+    const hash = hashCredential(session.credential.value);
+    const expiresAt = new Date(Date.now() + 10_000);
+    const idleBefore = new Date(Date.now() + 1_000);
+    await runtimePool.query(
+      'UPDATE ems_core.sessions SET expires_at = $2, idle_expires_at = $3 WHERE credential_hash = $1',
+      [hash, expiresAt.toISOString(), idleBefore.toISOString()],
+    );
+    const initial = await runtimePool.query<{ idle_expires_at: string; xmin: string }>(
+      'SELECT idle_expires_at::text, xmin::text FROM ems_core.sessions WHERE credential_hash = $1',
+      [hash],
+    );
+    const background = await authorization.authorizeBackground({ credential: session.credential, permission: 'platform.admin' });
+    assert.deepEqual(background, { ok: true, value: { allowed: true } });
+    const denied = await authorization.authorize({ credential: session.credential, permission: 'missing.permission' });
+    assert.equal(denied.ok, true);
+    if (denied.ok) assert.equal(denied.value.allowed, false);
+    const unchanged = await runtimePool.query<{ idle_expires_at: string; xmin: string }>(
+      'SELECT idle_expires_at::text, xmin::text FROM ems_core.sessions WHERE credential_hash = $1',
+      [hash],
+    );
+    assert.deepEqual(unchanged.rows[0], initial.rows[0]);
+
+    await runtimePool.query('UPDATE ems_core.sessions SET idle_expires_at = expires_at WHERE credential_hash = $1', [hash]);
+    const atDeadline = await runtimePool.query<{ xmin: string }>(
+      'SELECT xmin::text FROM ems_core.sessions WHERE credential_hash = $1',
+      [hash],
+    );
+    const foreground = await authorization.authorize({ credential: session.credential, permission: 'platform.admin' });
+    assert.deepEqual(foreground, { ok: true, value: { allowed: true } });
+    const afterDeadline = await runtimePool.query<{ xmin: string }>(
+      'SELECT xmin::text FROM ems_core.sessions WHERE credential_hash = $1',
+      [hash],
+    );
+    assert.equal(afterDeadline.rows[0]?.xmin, atDeadline.rows[0]?.xmin);
+  });
+
+  test('ошибка idle renewal не отменяет уже разрешенную авторизацию', async () => {
+    const upn = unique('idle-renewal-failure');
+    await bootstrap(upn, 'dept-idle-renewal-failure');
+    const session = await login(upn);
+    const hash = hashCredential(session.credential.value);
+    await runtimePool.query(
+      "UPDATE ems_core.sessions SET idle_expires_at = NOW() + INTERVAL '1 minute' WHERE credential_hash = $1",
+      [hash],
+    );
+    await migrationPool.query(`
+      CREATE OR REPLACE FUNCTION ems_core.reject_session_update() RETURNS trigger
+      LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic renewal failure'; END; $$;
+      CREATE TRIGGER reject_session_update BEFORE UPDATE ON ems_core.sessions
+      FOR EACH ROW EXECUTE FUNCTION ems_core.reject_session_update();
+    `);
+    try {
+      const result = await new PostgresAuthorizationFacade(runtimePool).authorize({
+        credential: session.credential,
+        permission: 'platform.admin',
+      });
+      assert.deepEqual(result, { ok: true, value: { allowed: true } });
+    } finally {
+      await migrationPool.query('DROP TRIGGER IF EXISTS reject_session_update ON ems_core.sessions; DROP FUNCTION IF EXISTS ems_core.reject_session_update();');
+    }
+  });
+
+  test('foreground и background authorization отклоняют expired и revoked сессии без renewal', async () => {
+    const upn = unique('inactive-session-admin');
+    await bootstrap(upn, 'dept-inactive-session');
+    const expiredSession = await login(upn);
+    const revokedSession = await login(upn);
+    const authorization = new PostgresAuthorizationFacade(runtimePool);
+    const expiredHash = hashCredential(expiredSession.credential.value);
+    const revokedHash = hashCredential(revokedSession.credential.value);
+    await runtimePool.query(
+      "UPDATE ems_core.sessions SET expires_at = NOW() - INTERVAL '1 second', idle_expires_at = NOW() - INTERVAL '1 second' WHERE credential_hash = $1",
+      [expiredHash],
+    );
+    await runtimePool.query(
+      "UPDATE ems_core.sessions SET revoked_at = NOW(), revocation_reason = 'TEST_REVOCATION' WHERE credential_hash = $1",
+      [revokedHash],
+    );
+    const before = await runtimePool.query<{ credential_hash: string; xmin: string }>(
+      'SELECT credential_hash, xmin::text FROM ems_core.sessions WHERE credential_hash = ANY($1::text[]) ORDER BY credential_hash',
+      [[expiredHash, revokedHash]],
+    );
+    const results = await Promise.all([
+      authorization.authorize({ credential: expiredSession.credential, permission: 'platform.admin' }),
+      authorization.authorizeBackground({ credential: expiredSession.credential, permission: 'platform.admin' }),
+      authorization.authorize({ credential: revokedSession.credential, permission: 'platform.admin' }),
+      authorization.authorizeBackground({ credential: revokedSession.credential, permission: 'platform.admin' }),
+    ]);
+    for (const result of results) {
+      assert.equal(result.ok, false);
+      if (!result.ok) assert.equal(result.error.code, 'UNAUTHENTICATED');
+    }
+    const after = await runtimePool.query<{ credential_hash: string; xmin: string }>(
+      'SELECT credential_hash, xmin::text FROM ems_core.sessions WHERE credential_hash = ANY($1::text[]) ORDER BY credential_hash',
+      [[expiredHash, revokedHash]],
+    );
+    assert.deepEqual(after.rows, before.rows);
   });
 });

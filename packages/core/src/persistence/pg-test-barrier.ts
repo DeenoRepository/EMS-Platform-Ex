@@ -14,8 +14,21 @@ export async function waitUntilBlocked(
   let lastCount = 0;
 
   while (Date.now() < deadline) {
-    const result = await pool.query<{ count: string }>(predicateSql);
-    lastCount = Number(result.rows[0]?.count ?? 0);
+    const remainingMs = Math.max(1, deadline - Date.now());
+    const client = await pool.rawPool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`SET LOCAL statement_timeout = ${Math.ceil(remainingMs)}`);
+      const result = await client.query<{ count: string }>(predicateSql);
+      lastCount = Number(result.rows[0]?.count ?? 0);
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK').catch(() => undefined);
+      if ((error as { code?: string }).code === '57014') break;
+      throw error;
+    } finally {
+      client.release();
+    }
     if (lastCount >= minimumCount) return;
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
@@ -27,12 +40,22 @@ export async function withDecoyLock<T>(
   pool: DatabasePool,
   sql: string,
   params: readonly unknown[],
-  operation: (release: () => Promise<void>, blockerPid: number) => Promise<T>,
+  operation: (
+    release: () => Promise<void>,
+    blockerPid: number,
+    track: <P extends Promise<unknown>>(promise: P) => P,
+  ) => Promise<T>,
 ): Promise<T> {
   const client = await pool.rawPool.connect();
   const pidResult = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
   const blockerPid = pidResult.rows[0]!.pid;
   let committed = false;
+  const pending = new Set<Promise<unknown>>();
+  const track = <P extends Promise<unknown>>(promise: P): P => {
+    pending.add(promise);
+    void promise.finally(() => pending.delete(promise)).catch(() => undefined);
+    return promise;
+  };
   const release = async () => {
     if (!committed) {
       await client.query('COMMIT');
@@ -42,13 +65,14 @@ export async function withDecoyLock<T>(
   try {
     await client.query('BEGIN');
     await client.query(sql, [...params]);
-    const result = await operation(release, blockerPid);
+    const result = await operation(release, blockerPid, track);
     await release();
     return result;
   } finally {
     if (!committed) {
       await client.query('ROLLBACK').catch(() => undefined);
     }
+    await Promise.allSettled([...pending]);
     client.release();
   }
 }

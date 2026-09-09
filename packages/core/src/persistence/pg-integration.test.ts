@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { SchemaMigrator } from './migrator.js';
 import { DatabasePool } from './db.js';
 import { AuditRepository } from './audit.repository.js';
-import { waitUntilBlocked } from './pg-test-barrier.js';
+import { blockedRowPredicate, waitUntilBlocked, withDecoyLock } from './pg-test-barrier.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -112,6 +112,37 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
     }
   });
 
+  test('сбой downSql восстанавливает DDL и metadata реальной транзакцией', async () => {
+    const migrationPool = new DatabasePool({ connectionString: migrationUrl });
+    const migrator = new SchemaMigrator(migrationPool);
+    try {
+      await migrator.teardownEphemeralSchema();
+      await migrator.applyMigration({ id: '001_core_schema', upSql: up001, downSql: down001 });
+      await migrator.applyMigration({ id: '002_core_security_remediation', upSql: up002, downSql: down002 });
+
+      await assert.rejects(
+        () => migrator.rollbackMigration({
+          id: '002_core_security_remediation',
+          upSql: up002,
+          downSql: `${down002}\nSELECT ems_core.synthetic_missing_rollback_function();`,
+        }),
+        /synthetic_missing_rollback_function/,
+      );
+
+      const metadata = await migrationPool.query<{ count: string }>(
+        "SELECT COUNT(*)::text AS count FROM ems_core.schema_migrations WHERE version = '002_core_security_remediation'",
+      );
+      const bootstrapTable = await migrationPool.query<{ exists: boolean }>(
+        "SELECT to_regclass('ems_core.bootstrap_state') IS NOT NULL AS exists",
+      );
+      assert.equal(metadata.rows[0]?.count, '1');
+      assert.equal(bootstrapTable.rows[0]?.exists, true);
+    } finally {
+      await migrator.teardownEphemeralSchema().catch(() => undefined);
+      await migrationPool.close();
+    }
+  });
+
   test('upgrade 001 -> 002 сохраняет legacy data и отзывает старые сессии', async () => {
     const migrationPool = new DatabasePool({ connectionString: migrationUrl });
     const runtimePool = new DatabasePool({ connectionString: runtimeUrl });
@@ -132,6 +163,13 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
       await migrator.applyMigration({ id: '002_core_security_remediation', upSql: up002, downSql: down002 });
       const state = await runtimePool.query<{ status: string }>('SELECT status FROM ems_core.bootstrap_state WHERE id = 1');
       assert.equal(state.rows[0]?.status, 'completed');
+      await assert.rejects(() => migrator.provisionClean(loadMigrations()), /absent ems_core schema/);
+      const preserved = await runtimePool.query<{ status: string; admin_count: string }>(`
+        SELECT bs.status,
+          (SELECT COUNT(*)::text FROM ems_core.employee_roles WHERE employee_id = 'emp-legacy') AS admin_count
+        FROM ems_core.bootstrap_state bs WHERE bs.id = 1
+      `);
+      assert.deepEqual(preserved.rows[0], { status: 'completed', admin_count: '1' });
       const session = await runtimePool.query<{ revoked_at: string | null; revocation_reason: string | null }>(
         'SELECT revoked_at::text, revocation_reason FROM ems_core.sessions WHERE id = $1', ['legacy-session'],
       );
@@ -158,9 +196,14 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
       await migrator.applyMigration({ id: '002_core_security_remediation', upSql: up002, downSql: down002 });
       const before = await runtimePool.query<{ status: string }>('SELECT status FROM ems_core.bootstrap_state WHERE id = 1');
       assert.equal(before.rows[0]?.status, 'locked-legacy');
+      await assert.rejects(() => migrator.provisionClean(loadMigrations()), /absent ems_core schema/);
       await migrator.applyMigration({ id: '002_core_security_remediation', upSql: up002, downSql: down002 });
       const after = await runtimePool.query<{ status: string }>('SELECT status FROM ems_core.bootstrap_state WHERE id = 1');
       assert.equal(after.rows[0]?.status, 'locked-legacy');
+      const metadata = await runtimePool.query<{ count: string }>(
+        'SELECT COUNT(*)::text AS count FROM ems_core.schema_migrations',
+      );
+      assert.equal(metadata.rows[0]?.count, '2');
     } finally {
       await migrator.teardownEphemeralSchema();
       await runtimePool.close();
@@ -279,10 +322,10 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
       await runtimePool.query(`
         INSERT INTO ems_core.audit_log (id, timestamp, subject_id, action, object_type, object_id, result)
         VALUES
-          ('micro-a', '2026-01-01 00:00:00.001001+00', 'micro', 'MICRO', 'test', 'a', 'SUCCESS'),
-          ('micro-b', '2026-01-01 00:00:00.001002+00', 'micro', 'MICRO', 'test', 'b', 'SUCCESS'),
-          ('micro-c', '2026-01-01 00:00:00.001003+00', 'micro', 'MICRO', 'test', 'c', 'SUCCESS'),
-          ('micro-d', '2026-01-01 00:00:00.001004+00', 'micro', 'MICRO', 'test', 'd', 'SUCCESS');
+          ('micro-z', '2026-01-01 00:00:00.001001+00', 'micro', 'MICRO', 'test', 'z', 'SUCCESS'),
+          ('micro-y', '2026-01-01 00:00:00.001002+00', 'micro', 'MICRO', 'test', 'y', 'SUCCESS'),
+          ('micro-b', '2026-01-01 00:00:00.001003+00', 'micro', 'MICRO', 'test', 'b', 'SUCCESS'),
+          ('micro-a', '2026-01-01 00:00:00.001004+00', 'micro', 'MICRO', 'test', 'a', 'SUCCESS');
       `);
       const audit = new AuditRepository();
       const pages: string[] = [];
@@ -292,7 +335,7 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
         pages.push(...page.items.map((item) => item.id));
         cursor = page.nextCursor;
       } while (cursor);
-      assert.deepEqual(pages, ['micro-d', 'micro-c', 'micro-b', 'micro-a']);
+      assert.deepEqual(pages, ['micro-a', 'micro-b', 'micro-y', 'micro-z']);
       assert.equal(new Set(pages).size, 4);
     } finally {
       await new SchemaMigrator(migrationPool).teardownEphemeralSchema().catch(() => undefined);
@@ -314,6 +357,101 @@ describe('PostgreSQL Real Integration Acceptance Tests', () => {
       assert.ok(Date.now() - startedAt < 2000);
     } finally {
       await new SchemaMigrator(migrationPool).teardownEphemeralSchema().catch(() => undefined);
+      await runtimePool.close();
+      await migrationPool.close();
+    }
+  });
+
+  test('waitUntilBlocked ограничивает длительность зависшего predicate SQL', async () => {
+    const runtimePool = new DatabasePool({ connectionString: runtimeUrl });
+    const startedAt = Date.now();
+    try {
+      await assert.rejects(
+        () => waitUntilBlocked(runtimePool, 'SELECT COUNT(*)::text AS count FROM pg_sleep(5)', 150),
+        /Ожидание блокировки PostgreSQL истекло/,
+      );
+      assert.ok(Date.now() - startedAt >= 150);
+      assert.ok(Date.now() - startedAt < 2000);
+    } finally {
+      await runtimePool.close();
+    }
+  });
+
+  test('посторонний lock waiter не открывает PID-привязанный барьер', async () => {
+    const migrationPool = new DatabasePool({ connectionString: migrationUrl });
+    const runtimePool = new DatabasePool({ connectionString: runtimeUrl });
+    const blocker = await runtimePool.rawPool.connect();
+    const waiter = await runtimePool.rawPool.connect();
+    try {
+      await new SchemaMigrator(migrationPool).teardownEphemeralSchema();
+      await new SchemaMigrator(migrationPool).provisionClean(loadMigrations());
+      await runtimePool.query(
+        `INSERT INTO ems_core.employees (id, directory_id, object_guid, upn, display_name, status)
+         VALUES ('foreign-waiter', 'corp.local', 'foreign-guid', 'foreign@corp.local', 'Foreign', 'PENDING')`,
+      );
+      await blocker.query('BEGIN');
+      const pid = await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+      await blocker.query("SELECT id FROM ems_core.employees WHERE id = 'foreign-waiter' FOR UPDATE");
+      const waitingUpdate = waiter.query("UPDATE ems_core.employees SET display_name = 'Waiting' WHERE id = 'foreign-waiter'");
+      await waitUntilBlocked(runtimePool, `
+        SELECT COUNT(*)::text AS count
+        FROM pg_stat_activity
+        WHERE wait_event_type = 'Lock' AND ${pid.rows[0]!.pid} = ANY(pg_blocking_pids(pid))
+      `);
+      await assert.rejects(
+        () => waitUntilBlocked(runtimePool, `
+          SELECT COUNT(*)::text AS count
+          FROM pg_stat_activity
+          WHERE wait_event_type = 'Lock' AND 0 = ANY(pg_blocking_pids(pid))
+        `, 150),
+        /Ожидание блокировки PostgreSQL истекло/,
+      );
+      await blocker.query('ROLLBACK');
+      await waitingUpdate;
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+      waiter.release();
+      await new SchemaMigrator(migrationPool).teardownEphemeralSchema().catch(() => undefined);
+      await runtimePool.close();
+      await migrationPool.close();
+    }
+  });
+
+  test('withDecoyLock дожидается tracked operation после timeout барьера', async () => {
+    const migrationPool = new DatabasePool({ connectionString: migrationUrl });
+    const runtimePool = new DatabasePool({ connectionString: runtimeUrl });
+    const migrator = new SchemaMigrator(migrationPool);
+    try {
+      await migrator.teardownEphemeralSchema();
+      await migrator.provisionClean(loadMigrations());
+      await runtimePool.query(
+        `INSERT INTO ems_core.employees (id, directory_id, object_guid, upn, display_name, status)
+         VALUES ('drain-employee', 'corp.local', 'drain-guid', 'drain@corp.local', 'Before drain', 'PENDING')`,
+      );
+
+      await assert.rejects(
+        () => withDecoyLock(
+          runtimePool,
+          'SELECT id FROM ems_core.employees WHERE id = $1 FOR UPDATE',
+          ['drain-employee'],
+          async (_release, blockerPid, track) => {
+            track(runtimePool.query(
+              "UPDATE ems_core.employees SET display_name = 'After drain' WHERE id = 'drain-employee'",
+            ));
+            await waitUntilBlocked(runtimePool, blockedRowPredicate('ems_core.employees', blockerPid));
+            await waitUntilBlocked(runtimePool, 'SELECT 0::text AS count', 150);
+          },
+        ),
+        /Ожидание блокировки PostgreSQL истекло/,
+      );
+
+      const drained = await runtimePool.query<{ display_name: string }>(
+        "SELECT display_name FROM ems_core.employees WHERE id = 'drain-employee'",
+      );
+      assert.equal(drained.rows[0]?.display_name, 'After drain');
+    } finally {
+      await migrator.teardownEphemeralSchema().catch(() => undefined);
       await runtimePool.close();
       await migrationPool.close();
     }
