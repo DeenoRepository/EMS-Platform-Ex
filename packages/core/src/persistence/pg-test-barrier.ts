@@ -51,11 +51,12 @@ export async function withDecoyLock<T>(
 }
 
 export function blockedRowPredicate(relation: string): string {
+  void relation;
   return `
     SELECT COUNT(*)::text AS count
-    FROM pg_locks
-    WHERE NOT granted
-      AND relation = '${relation}'::regclass
+    FROM pg_stat_activity
+    WHERE wait_event_type = 'Lock'
+      AND pid <> pg_backend_pid()
   `;
 }
 

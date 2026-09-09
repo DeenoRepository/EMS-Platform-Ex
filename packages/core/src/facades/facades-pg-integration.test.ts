@@ -196,11 +196,12 @@ describe('PostgreSQL facade concurrency acceptance', () => {
 
   test('bootstrap существующего ACTIVE-сотрудника назначает администратора перед входом', async () => {
     const existingUpn = unique('existing-employee');
-    await runtimePool.query(`
-      INSERT INTO ems_core.departments (id, name, code) VALUES ('dept-existing', 'Existing', 'EXISTING');
-      INSERT INTO ems_core.employees (id, directory_id, object_guid, upn, display_name, status, department_id)
-      VALUES ('employee-existing', 'corp.local', $1, $2, $3, 'ACTIVE', 'dept-existing');
-    `, [`guid-${existingUpn}`, existingUpn, `Display ${existingUpn}`]);
+    await runtimePool.query("INSERT INTO ems_core.departments (id, name, code) VALUES ('dept-existing', 'Existing', 'EXISTING')");
+    await runtimePool.query(
+      `INSERT INTO ems_core.employees (id, directory_id, object_guid, upn, display_name, status, department_id)
+       VALUES ('employee-existing', 'corp.local', $1, $2, $3, 'ACTIVE', 'dept-existing')`,
+      [`guid-${existingUpn}`, existingUpn, `Display ${existingUpn}`],
+    );
     const boot = await bootstrap(existingUpn, 'dept-bootstrap');
     const target = await employee(boot.employeeId);
     assert.equal(target?.status, 'ACTIVE');
