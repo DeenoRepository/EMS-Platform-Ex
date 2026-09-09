@@ -52,14 +52,18 @@ export async function withDecoyLock<T>(
 
 export function blockedRowPredicate(relation: string): string {
   const escapedRelation = relation.replaceAll("'", "''");
+  const escapedQueryFragment = relation.replaceAll("'", "''");
   return `
     SELECT COUNT(*)::text AS count
     FROM pg_locks waiting
     JOIN pg_stat_activity activity ON activity.pid = waiting.pid
-    JOIN pg_class relation ON relation.oid = waiting.relation
     WHERE NOT waiting.granted
-      AND relation.oid = '${escapedRelation}'::regclass
       AND activity.pid <> pg_backend_pid()
+      AND activity.wait_event_type = 'Lock'
+      AND (
+        waiting.relation = '${escapedRelation}'::regclass
+        OR activity.query LIKE '%${escapedQueryFragment}%'
+      )
   `;
 }
 
