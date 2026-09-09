@@ -3,9 +3,10 @@
 ## Метаданные
 
 - Статус: **Approved**
-- Версия: 1.0.0
+- Версия: 1.0.1
 - Владелец и утверждающий: владелец проекта
 - Утверждено: 2026-09-09
+- Изменено: 2026-09-09, версия 1.0.1 — версия `ldapts` синхронизирована с ADR-0004 1.1.0 (`8.2.0`)
 - Базовая ревизия: `2d0e42e`
 - Решения: ADR-0001..0006
 
@@ -15,7 +16,7 @@
 
 ## Область
 
-- Server-only LDAP adapter на `ldapts` 9.0.0.
+- Server-only LDAP adapter на `ldapts` 8.2.0.
 - Login Route Handler с runtime validation, throttling и безопасной ошибкой.
 - Защищенная cookie-сессия и server authorization boundary.
 - Read-only страницы login, pending, blocked и доступного демо-модуля.
@@ -70,7 +71,7 @@
 
 ## Последовательность реализации
 
-1. Добавить и проверить `ldapts` 9.0.0, реализовать adapter и unit/integration tests.
+1. Добавить и проверить `ldapts` 8.2.0, реализовать adapter и unit/integration tests.
 2. Утвердить полный Next.js peer/build dependency set, установить exact versions и зафиксировать lockfile.
 3. Реализовать cookie, CSRF и login throttling server utilities с negative tests.
 4. Создать App Router composition, route map и read-only UI.

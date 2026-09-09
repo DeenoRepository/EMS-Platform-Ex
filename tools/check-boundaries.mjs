@@ -80,6 +80,22 @@ const allowed = new Map([
   ['@ems/web', new Set([...packageRoots.keys()].filter((name) => name !== '@ems/web'))],
 ]);
 
+// Внешние зависимости, которые открывают соединение со службой каталога или БД,
+// либо обращаются к секретам. Они не должны попадать в граф пакетов, код которых
+// может быть отправлен в браузер (S2-NFR-002).
+const serverOnlyDependencies = new Set(['ldapts', 'pg']);
+
+// Пакеты, чей код целиком или частично исполняется в браузере.
+// `@ems/core` и `apps/web` сюда не входят: ядро является server-only,
+// а composition root разделяет server/client entry points средствами фреймворка.
+const clientReachablePackages = new Set([
+  '@ems/contracts',
+  '@ems/shell',
+  '@ems/shared-controls',
+  '@ems/demo-module',
+  '@ems/diagnostic-extension',
+]);
+
 for (const [packageName, relativeRoot] of packageRoots) {
   const packageRoot = path.resolve(root, relativeRoot);
   if (!fs.existsSync(packageRoot)) continue;
@@ -125,6 +141,9 @@ for (const [packageName, relativeRoot] of packageRoots) {
       }
       if (!packageRoots.has(dependency) && !declared.has(dependency) && dependency !== packageName) {
         errors.push(`${file}: undeclared dependency ${dependency}`);
+      }
+      if (serverOnlyDependencies.has(dependency) && clientReachablePackages.has(packageName)) {
+        errors.push(`${file}: server-only dependency ${dependency} is not allowed in client-reachable package ${packageName}`);
       }
     }
   }

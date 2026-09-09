@@ -20,12 +20,13 @@
   },
   "dependencies": {
     "@ems/contracts": "workspace:*",
+    "ldapts": "8.2.0",
     "pg": "^8.23.0"
   },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test dist/registry.test.js dist/facades/facades.test.js dist/persistence/migrator.test.js dist/persistence/pg-integration.test.js dist/cli/migrate.test.js",
+    "test": "tsc && node --test dist/registry.test.js dist/facades/facades.test.js dist/directory/directory.test.js dist/persistence/migrator.test.js dist/persistence/pg-integration.test.js dist/cli/migrate.test.js",
     "test:pg": "node ../../tools/require-pg-acceptance.mjs && tsc && node ../../tools/run-pg-test.mjs"
   },
   "devDependencies": {
