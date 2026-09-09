@@ -6,9 +6,11 @@ import { SchemaMigrator } from '../persistence/migrator.js';
 import { EmployeeRepository } from '../persistence/employee.repository.js';
 import { PostgresAdministrationFacade } from './postgres-administration.facade.js';
 import { ADMIN_ROLE_ID, PostgresIdentityFacade } from './postgres-identity.facade.js';
+import { PostgresAuthorizationFacade } from './postgres-authorization.facade.js';
 import { PostgresAuditFacade } from './postgres-audit.facade.js';
 import { ok, type DirectoryAuthenticator, type DirectoryIdentityResolver, type LocalOperatorPort } from '@ems/contracts';
 import { blockedRowPredicate, withDecoyLock, waitUntilBlocked } from '../persistence/pg-test-barrier.js';
+import { hashCredential } from './subject-auth.js';
 
 const isOptIn = process.env.EMS_TEST_PG_INTEGRATION === 'true';
 const migrationUrl = process.env.EMS_TEST_PG_MIGRATION_URL;
@@ -277,5 +279,74 @@ describe('PostgreSQL facade concurrency acceptance', () => {
     const session = await login(upn);
     const result = await audit.query({ actorCredential: session.credential, action: 'BOOTSTRAP', limit: 10 });
     assert.equal(result.ok, true);
+  });
+
+  test('делегирование роли с modules.manage отклоняется оператору без этого права', async () => {
+    const adminUpn = unique('delegation-admin');
+    const targetUpn = unique('delegation-target');
+    await bootstrap(adminUpn, 'dept-delegation');
+    const adminSession = await login(adminUpn);
+    const targetSession = await login(targetUpn);
+    await runtimePool.query(
+      `INSERT INTO ems_core.roles (id, name, description, is_system)
+       VALUES ('role.module.manager', 'Module manager', NULL, false)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await runtimePool.query(
+      `INSERT INTO ems_core.role_permissions (role_id, permission_id)
+       VALUES ('role.module.manager', 'modules.manage') ON CONFLICT DO NOTHING`,
+    );
+    await runtimePool.query(
+      `DELETE FROM ems_core.employee_roles WHERE employee_id = $1`,
+      [adminSession.session.employeeId],
+    );
+    await runtimePool.query(
+      `INSERT INTO ems_core.roles (id, name, description, is_system)
+       VALUES ('role.employee.manager', 'Employee manager', NULL, false)
+       ON CONFLICT (id) DO NOTHING`,
+    );
+    await runtimePool.query(
+      `INSERT INTO ems_core.role_permissions (role_id, permission_id)
+       VALUES ('role.employee.manager', 'employees.manage') ON CONFLICT DO NOTHING`,
+    );
+    await runtimePool.query(
+      `INSERT INTO ems_core.employee_roles (employee_id, role_id)
+       VALUES ($1, 'role.employee.manager')`,
+      [adminSession.session.employeeId],
+    );
+
+    const result = await administration.assignEmployee({
+      actorCredential: adminSession.credential,
+      employeeId: targetSession.session.employeeId,
+      departmentId: 'dept-delegation',
+      roleIds: ['role.module.manager'],
+      expectedVersion: 1,
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.error.code, 'FORBIDDEN');
+  });
+
+  test('успешная авторизация продлевает idle TTL, но не за absolute TTL', async () => {
+    const upn = unique('idle-admin');
+    await bootstrap(upn, 'dept-idle');
+    const session = await login(upn);
+    const expiresAt = new Date(Date.now() + 10_000);
+    const idleBefore = new Date(Date.now() + 1_000);
+    await runtimePool.query(
+      `UPDATE ems_core.sessions
+       SET expires_at = $2, idle_expires_at = $3
+       WHERE credential_hash = $1`,
+      [hashCredential(session.credential.value), expiresAt.toISOString(), idleBefore.toISOString()],
+    );
+    const authorization = new PostgresAuthorizationFacade(runtimePool);
+    const result = await authorization.authorize({ credential: session.credential, permission: 'platform.admin' });
+    assert.equal(result.ok, true);
+    const row = await runtimePool.query<{ idle_expires_at: string; expires_at: string }>(
+      `SELECT idle_expires_at::text, expires_at::text FROM ems_core.sessions
+       WHERE credential_hash = $1`,
+      [hashCredential(session.credential.value)],
+    );
+    assert.ok(new Date(row.rows[0]!.idle_expires_at) > idleBefore);
+    assert.ok(new Date(row.rows[0]!.idle_expires_at) <= new Date(row.rows[0]!.expires_at));
   });
 });

@@ -225,6 +225,21 @@ class MockDatabasePool {
       }
       return { rows: [], rowCount: 0 };
     }
+    if (cleanSql.includes('UPDATE ems_core.sessions') && cleanSql.includes('SET idle_expires_at =')) {
+      const s = this.sessions.get(params[0]);
+      const now = Date.now();
+      if (
+        s &&
+        !s.revoked_at &&
+        new Date(s.expires_at).getTime() > now &&
+        new Date(s.idle_expires_at).getTime() > now &&
+        new Date(s.idle_expires_at).getTime() < now + params[2]
+      ) {
+        s.idle_expires_at = new Date(Math.min(now + params[1], new Date(s.expires_at).getTime())).toISOString();
+        return { rows: [s], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    }
     if (cleanSql.includes('UPDATE ems_core.sessions') && cleanSql.includes('WHERE credential_hash = $1')) {
       const s = this.sessions.get(params[0]);
       if (s && !s.revoked_at) {
@@ -515,20 +530,120 @@ describe('Postgres Core Facades unit tests (in-memory simulator)', () => {
     assert.equal(adminLogin.ok, true);
     if (!adminLogin.ok) return;
 
-    // Пытаемся забрать роль администратора у единственного активного администратора
-    const tryRemoveAdmin = await adminFacade.assignEmployee({
+    // Проверка last-admin invariant на другом сотруднике.
+    const targetLogin = await identityFacade.login({
+      upn: 'admin-target@corp.local',
+      password: 'correct-password',
+    });
+    assert.equal(targetLogin.ok, true);
+    if (!targetLogin.ok) return;
+    const assignTarget = await adminFacade.assignEmployee({
+      actorCredential: adminLogin.value.credential,
+      employeeId: targetLogin.value.session.employeeId,
+      departmentId: 'dept-platform',
+      roleIds: [ADMIN_ROLE_ID],
+      expectedVersion: 1,
+    });
+    assert.equal(assignTarget.ok, true);
+    (adminFacade as any).employeeRepo.countActiveAdmins = async () => 1;
+    const removeTarget = await adminFacade.assignEmployee({
+      actorCredential: adminLogin.value.credential,
+      employeeId: targetLogin.value.session.employeeId,
+      departmentId: 'dept-platform',
+      roleIds: [],
+      expectedVersion: 2,
+    });
+    assert.equal(removeTarget.ok, false);
+    if (!removeTarget.ok) {
+      assert.equal(removeTarget.error.code, 'CONFLICT');
+      assert.match(removeTarget.error.message, /FR-019/);
+    }
+
+    // Самоназначение проверяется отдельным запросом и не смешивается
+    // с проверкой последнего администратора.
+    const selfChange = await adminFacade.assignEmployee({
       actorCredential: adminLogin.value.credential,
       employeeId: boot.value.employeeId,
       departmentId: 'dept-platform',
-      roleIds: [], // без роли админа!
+      roleIds: [ADMIN_ROLE_ID],
       expectedVersion: 1,
     });
+    assert.equal(selfChange.ok, false);
+    if (!selfChange.ok) assert.equal(selfChange.error.code, 'FORBIDDEN');
+  });
 
-    assert.equal(tryRemoveAdmin.ok, false);
-    if (!tryRemoveAdmin.ok) {
-      assert.equal(tryRemoveAdmin.error.code, 'CONFLICT');
-      assert.match(tryRemoveAdmin.error.message, /FR-019/);
-    }
+  test('делегирование ролей запрещает эскалацию и самоназначение, но разрешает дельту-подмножество', async () => {
+    const mockDb = new MockDatabasePool() as any;
+    const identityFacade = new PostgresIdentityFacade(mockDb, fakeLdap, fakeLdap, defaultOperatorPort);
+    const adminFacade = new PostgresAdministrationFacade(mockDb);
+
+    await identityFacade.bootstrap({ upn: 'delegation-admin@corp.local', initialDepartmentId: 'dept-platform' });
+    mockDb.roles.set('role.employee.manager', { id: 'role.employee.manager' });
+    mockDb.roles.set('role.module.manager', { id: 'role.module.manager' });
+    mockDb.rolePermissions.set('role.employee.manager', new Set(['employees.manage']));
+    mockDb.rolePermissions.set('role.module.manager', new Set(['modules.manage']));
+    const actorLogin = await identityFacade.login({ upn: 'delegation-admin@corp.local', password: 'password' });
+    assert.equal(actorLogin.ok, true);
+    if (!actorLogin.ok) return;
+    const targetLogin = await identityFacade.login({ upn: 'delegation-target@corp.local', password: 'password' });
+    assert.equal(targetLogin.ok, true);
+    if (!targetLogin.ok) return;
+
+    // Оставляем оператору только employees.manage, без modules.manage.
+    mockDb.employeeRoles.set(actorLogin.value.session.employeeId, new Set(['role.employee.manager']));
+    const escalation = await adminFacade.assignEmployee({
+      actorCredential: actorLogin.value.credential,
+      employeeId: targetLogin.value.session.employeeId,
+      departmentId: 'dept-platform',
+      roleIds: ['role.module.manager'],
+      expectedVersion: 1,
+    });
+    assert.equal(escalation.ok, false);
+    if (!escalation.ok) assert.equal(escalation.error.code, 'FORBIDDEN');
+
+    const subset = await adminFacade.assignEmployee({
+      actorCredential: actorLogin.value.credential,
+      employeeId: targetLogin.value.session.employeeId,
+      departmentId: 'dept-platform',
+      roleIds: ['role.employee.manager'],
+      expectedVersion: 1,
+    });
+    assert.equal(subset.ok, true);
+
+    const selfChange = await adminFacade.assignEmployee({
+      actorCredential: actorLogin.value.credential,
+      employeeId: actorLogin.value.session.employeeId,
+      departmentId: 'dept-platform',
+      roleIds: ['role.employee.manager'],
+      expectedVersion: 1,
+    });
+    assert.equal(selfChange.ok, false);
+    if (!selfChange.ok) assert.equal(selfChange.error.code, 'FORBIDDEN');
+  });
+
+  test('idle TTL продлевается только после успешной авторизации и ограничивается throttle/absolute TTL', async () => {
+    const mockDb = new MockDatabasePool() as any;
+    const identityFacade = new PostgresIdentityFacade(mockDb, fakeLdap, fakeLdap, defaultOperatorPort);
+    const authzFacade = new PostgresAuthorizationFacade(mockDb);
+    await identityFacade.bootstrap({ upn: 'idle-admin@corp.local', initialDepartmentId: 'dept-platform' });
+    const loginRes = await identityFacade.login({ upn: 'idle-admin@corp.local', password: 'password' });
+    assert.equal(loginRes.ok, true);
+    if (!loginRes.ok) return;
+    const hash = (await import('./subject-auth.js')).hashCredential(loginRes.value.credential.value);
+    const session = mockDb.sessions.get(hash);
+    session.idle_expires_at = new Date(Date.now() + 1_000).toISOString();
+    session.expires_at = new Date(Date.now() + 10_000).toISOString();
+    const before = session.idle_expires_at;
+    const allowed = await authzFacade.authorize({ credential: loginRes.value.credential, permission: 'platform.admin' });
+    assert.equal(allowed.ok, true);
+    assert.notEqual(session.idle_expires_at, before);
+    assert.ok(new Date(session.idle_expires_at) <= new Date(session.expires_at));
+    const renewed = session.idle_expires_at;
+    await authzFacade.authorize({ credential: loginRes.value.credential, permission: 'platform.admin' });
+    assert.equal(session.idle_expires_at, renewed);
+    const denied = await authzFacade.authorize({ credential: loginRes.value.credential, permission: 'not-granted' });
+    assert.equal(denied.ok, true);
+    assert.equal(session.idle_expires_at, renewed);
   });
 
   test('выход из системы отзывает сессию (SessionFacade, FR-028)', async () => {

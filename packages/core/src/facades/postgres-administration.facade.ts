@@ -169,6 +169,31 @@ export class PostgresAdministrationFacade implements AdministrationFacade {
         const wasAdmin = currentRoles.includes(ADMIN_ROLE_ID);
         const willBeAdmin = uniqueRoleIds.includes(ADMIN_ROLE_ID);
 
+        if (actor.id === input.employeeId) {
+          throw new TransactionAbortError({
+            code: 'FORBIDDEN',
+            message: 'Оператор не может изменять собственное назначение сотрудника',
+            retryable: false,
+          });
+        }
+
+        const addedRoleIds = uniqueRoleIds.filter((roleId) => !currentRoles.includes(roleId));
+        const removedRoleIds = currentRoles.filter((roleId) => !uniqueRoleIds.includes(roleId));
+        const delegatedPermissions = await this.roleRepo.getPermissionsForRoles(
+          client,
+          [...addedRoleIds, ...removedRoleIds],
+        );
+        const missingPermissions = delegatedPermissions.filter(
+          (permission) => !actorPermissions.includes(permission),
+        );
+        if (missingPermissions.length > 0) {
+          throw new TransactionAbortError({
+            code: 'FORBIDDEN',
+            message: `Оператор не может делегировать роли: отсутствуют разрешения ${missingPermissions.join(', ')}`,
+            retryable: false,
+          });
+        }
+
         if ((!wasAdmin && willBeAdmin) || (wasAdmin && !willBeAdmin)) {
           // Добавление или снятие роли platform.admin требует обладания этой ролью
           if (!actorRoleIds.includes(ADMIN_ROLE_ID)) {

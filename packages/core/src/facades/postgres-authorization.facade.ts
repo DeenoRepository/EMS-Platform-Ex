@@ -7,11 +7,18 @@ import type {
 import { ok, fail } from '@ems/contracts';
 import type { DatabasePool } from '../persistence/db.js';
 import { ModuleAvailabilityRepository } from '../persistence/module-availability.repository.js';
+import { SessionRepository } from '../persistence/session.repository.js';
+import { hashCredential } from './subject-auth.js';
 import { verifySubjectCredential } from './subject-auth.js';
 import { dependencyFailure } from './errors.js';
 
+const IDLE_TTL_MS = 30 * 60 * 1000;
+const IDLE_RENEW_THROTTLE_MS = 5 * 60 * 1000;
+const IDLE_RENEW_THRESHOLD_MS = IDLE_TTL_MS - IDLE_RENEW_THROTTLE_MS;
+
 export class PostgresAuthorizationFacade implements AuthorizationFacade {
   private readonly moduleAvailabilityRepo = new ModuleAvailabilityRepository();
+  private readonly sessionRepo = new SessionRepository();
 
   constructor(private readonly pool: DatabasePool) {}
 
@@ -98,6 +105,19 @@ export class PostgresAuthorizationFacade implements AuthorizationFacade {
         allowed: false,
         reason: `Отсутствует требуемое разрешение '${permission}'`,
       });
+    }
+
+    try {
+      // Authorization is not transactional; concurrent renewals are harmless because
+      // the update is throttled and LEAST() preserves the absolute deadline.
+      await this.sessionRepo.renewIdle(
+        this.pool,
+        hashCredential(input.credential!.value),
+        IDLE_TTL_MS,
+        IDLE_RENEW_THRESHOLD_MS,
+      );
+    } catch {
+      // A renewal failure must not turn an already successful authorization into denial.
     }
 
     return ok({ allowed: true });

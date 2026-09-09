@@ -4,7 +4,7 @@
 - Версия решения: 1.0.0
 - Владелец решения: владелец проекта
 - Утверждено: владельцем проекта (2026-09-07)
-- Дата пересмотра: до реализации LDAP/session/authz
+- Дата пересмотра: 2026-09-09; session и delegation уточнены в ADR-0005
 - Связанные требования: FR-001..031, NFR-002..004
 
 ## Контекст
@@ -31,6 +31,10 @@ LDAP подтверждает личность, а PostgreSQL является �
 - Clean provisioning разрешён только при отсутствии схемы `ems_core`, под migration advisory lock и с непустым полным набором миграций. Обычный upgrade не переводит `completed` или `locked-legacy` в `ready`.
 - Ошибки dependency ports и PostgreSQL нормализуются в безопасные `Result`; ответы портов и timestamps audit boundary проходят runtime-проверку.
 - Registry выдаёт изолированные снимки manifest и `registeredAt`. Эти уточнения не меняют публичные DTO, grammar идентификаторов или SQL-схему.
+
+## Статус уточнений
+
+Открытые пункты cookie/session transport, idle activity, CSRF, rate limits, LDAP timeouts и delegation закрыты ADR-0005 (Approved, 2026-09-09). Оставшиеся открытые решения перечислены в ADR-0005.
 
 ## Предлагаемые фасады и свойства операций
 
